@@ -38,7 +38,7 @@ BUILD_SCHEMA_VERSION = 3
 EIGEN_TREE_SHA256 = "a619ab288a4da17edd0caf0a3f2335d37ea26df14dd5eedb1591d0d1d860ddb7"
 OVOXEL_CPU_DISTRIBUTION = "modly-lato2-ovoxel-cpu"
 OVOXEL_CPU_VERSION = "0.0.1.post2"
-TEMPLATE_TREE_SHA256 = "545ead24fc7d9bc01aa94217d2e18d07a503d09477a1529921fc748bd32e7426"
+TEMPLATE_TREE_SHA256 = "930378bb300fde0e8e99d68750e3e2ba1937995901c7e1634a7ba59deb928691"
 
 # The locally built wheel contains copied TRELLIS.2 and Eigen code.  Keep the
 # license payload anchored to repository-controlled hashes so a stale or

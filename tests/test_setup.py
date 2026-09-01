@@ -37,6 +37,13 @@ FINGERPRINT = {
     "pointer_bits": 64,
 }
 
+FINGERPRINT_312 = {
+    **FINGERPRINT,
+    "version": [3, 12],
+    "cache_tag": "cpython-312",
+    "soabi": "cpython-312-x86_64-linux-gnu",
+}
+
 
 def fake_plan(*, exact: bool = False):
     return types.SimpleNamespace(
@@ -48,6 +55,7 @@ def fake_plan(*, exact: bool = False):
         attention_backend="flash_attn" if exact else "sdpa",
         install_native_stack=exact,
         support_level="toolchain-dependent" if exact else "compatibility",
+        python_abi=setup.deps.python_abi_from_fingerprint(FINGERPRINT),
     )
 
 
@@ -110,7 +118,7 @@ class ParseTests(unittest.TestCase):
 
 
 class ContextTests(unittest.TestCase):
-    def test_normalizes_host_contract_and_requires_cpython_311(self) -> None:
+    def test_normalizes_host_contract_and_accepts_supported_cpython_abis(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             payload = {
@@ -122,13 +130,16 @@ class ContextTests(unittest.TestCase):
                 "platform": sys.platform,
                 "arch": platform.machine(),
             }
-            with patch.object(setup, "interpreter_fingerprint", return_value=FINGERPRINT):
-                context = setup.validate_context(payload, root)
-            self.assertEqual(context.platform_name, setup.current_platform_name())
-            self.assertEqual(context.arch, setup._normalize_arch(platform.machine()))
-            self.assertEqual(context.host_fingerprint, FINGERPRINT)
+            for fingerprint in (FINGERPRINT, FINGERPRINT_312):
+                with self.subTest(version=fingerprint["version"]), patch.object(
+                    setup, "interpreter_fingerprint", return_value=fingerprint
+                ):
+                    context = setup.validate_context(payload, root)
+                self.assertEqual(context.platform_name, setup.current_platform_name())
+                self.assertEqual(context.arch, setup._normalize_arch(platform.machine()))
+                self.assertEqual(context.host_fingerprint, fingerprint)
 
-    def test_rejects_wrong_python_abi(self) -> None:
+    def test_rejects_unsupported_python_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             payload = {
@@ -138,11 +149,25 @@ class ContextTests(unittest.TestCase):
                 "platform": sys.platform,
                 "arch": platform.machine(),
             }
-            wrong = {**FINGERPRINT, "version": [3, 12]}
-            with patch.object(setup, "interpreter_fingerprint", return_value=wrong):
-                with self.assertRaises(setup.SetupFailure) as raised:
-                    setup.validate_context(payload, root)
-            self.assertEqual(raised.exception.code, "PYTHON_ABI_UNSUPPORTED")
+            unsupported = (
+                {**FINGERPRINT, "version": [3, 10], "cache_tag": "cpython-310"},
+                {**FINGERPRINT_312, "version": [3, 13], "cache_tag": "cpython-313"},
+                {**FINGERPRINT_312, "implementation": "pypy"},
+                {**FINGERPRINT_312, "pointer_bits": 32},
+                {
+                    **FINGERPRINT_312,
+                    "abiflags": "d",
+                    "soabi": "cpython-312d-x86_64-linux-gnu",
+                },
+                {**FINGERPRINT_312, "soabi": "not-a-python-abi"},
+            )
+            for fingerprint in unsupported:
+                with self.subTest(fingerprint=fingerprint), patch.object(
+                    setup, "interpreter_fingerprint", return_value=fingerprint
+                ):
+                    with self.assertRaises(setup.SetupFailure) as raised:
+                        setup.validate_context(payload, root)
+                self.assertEqual(raised.exception.code, "PYTHON_ABI_UNSUPPORTED")
 
     def test_interpreter_probe_does_not_inherit_secrets_or_python_overrides(self) -> None:
         completed = types.SimpleNamespace(stdout=json.dumps(FINGERPRINT))
@@ -408,6 +433,9 @@ class EnvironmentTests(unittest.TestCase):
             staging = root / setup.VENV_STAGING_NAME
             (staging / "bin").mkdir(parents=True)
             (staging / "bin/python").write_text("new", encoding="utf-8")
+            (staging / "pyvenv.cfg").write_text(
+                "include-system-site-packages = false\n", encoding="utf-8"
+            )
             state_staging = root / setup.STATE_STAGING_FILENAME
             state_staging.write_text("new-state", encoding="utf-8")
             config = root / setup.RUNTIME_CONFIG_FILENAME
@@ -578,6 +606,9 @@ class EnvironmentTests(unittest.TestCase):
                 python = target_venv / "bin/python"
                 python.parent.mkdir(parents=True, exist_ok=True)
                 python.touch()
+                (target_venv / "pyvenv.cfg").write_text(
+                    "include-system-site-packages = false\n", encoding="utf-8"
+                )
                 events.append("venv")
                 return python
 
@@ -760,6 +791,9 @@ class EnvironmentTests(unittest.TestCase):
                 python = target_venv / "bin/python"
                 python.parent.mkdir(parents=True)
                 python.write_text("new-python", encoding="utf-8")
+                (target_venv / "pyvenv.cfg").write_text(
+                    "include-system-site-packages = false\n", encoding="utf-8"
+                )
                 return python
 
             def write_staging_state(path, payload):

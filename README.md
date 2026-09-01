@@ -28,9 +28,11 @@ remain unverified. The compatibility rows below describe implemented setup
 routes, not completed hardware certification.
 
 The highest completed validation tier is the repository's automated
-contract/unit suite on the current Linux development host. Native compilation,
-real-GPU dependency setup, and checkpoint generation are the next tier and
-remain pending on every platform row below.
+contract/unit suite and strict extension validation on Linux ARM64 with
+CPython 3.12. This proves setup-contract selection and lock separation, not a
+real installation. Native compilation, real-GPU dependency setup, and
+checkpoint generation are the next tier and remain pending on every platform
+row below.
 
 ## Usage
 
@@ -64,7 +66,10 @@ and `num_samples` are fixed to `1`.
 
 ### Prerequisites
 
-- Upstream Modly 0.4.2 with its embedded CPython 3.11 runtime.
+- A 64-bit CPython runtime selected by Modly: upstream Modly 0.4.2's CPython
+  3.11 lane remains supported unchanged, and CPython 3.12 uses a separate
+  dependency/ABI lane. Setup rejects every other Python implementation,
+  bitness, or major/minor version.
 - A supported NVIDIA CUDA GPU. CPU, ROCm, macOS, and Windows ARM64 are not
   supported by this release.
 - An NVIDIA driver compatible with the selected PyTorch lane: cu124 for the
@@ -222,13 +227,17 @@ full O-Voxel package and verifies their native symbols.
   2.7.4.post1 on the selected Linux route, plus the source revisions listed
   under Reproducibility pins.
 
-Setup carries a complete exact-version constraint closure for the direct and
-transitive distributions in each of eight audited CPython 3.11 plans across
-Windows x64, Linux x64, Linux ARM64, cu124/cu126/cu128, and the Windows/Linux
-exact profiles. The selected closure is part of the dependency-lock digest,
-materialized atomically in the extension-owned cache, and supplied to every
+Setup carries two explicit Python dependency lanes. `cp311` preserves the
+original exact-version constraint closures for upstream Modly; `cp312` is a
+new, independently selected lane for Modly runtimes embedding CPython 3.12.
+Each lane covers the eight audited Windows x64, Linux x64, Linux ARM64,
+cu124/cu126/cu128, and Windows/Linux exact plans. The Python version, cache
+tag, SOABI, ABI flags, and pointer width are part of the dependency-lock
+payload and digest, so constraints, native build caches, and environments can
+never be reused across `cp311` and `cp312`. The selected closure is
+materialized atomically in the extension-owned cache and supplied to every
 pip install stage, including the locally built CPU O-Voxel add-on. An
-unaudited OS/architecture/Torch combination fails closed.
+unaudited Python/OS/architecture/Torch combination fails closed.
 
 Remote package stages use explicit fixed indexes and binary wheels only,
 except for the pinned FlashAttention 2.7.4.post1 external source build. Native
@@ -245,8 +254,9 @@ This is a complete **version closure**, not an artifact-hash wheelhouse:
 third-party PyPI/PyTorch wheels and the FlashAttention source artifact do not
 all have wrapper-controlled SHA-256 pins. Model/source downloads and the
 native source trees are independently pinned by byte size, SHA-256, immutable
-revision, and complete-tree digest. The eight package closures were validated
-against CPython 3.11 resolution/metadata, but that does not replace the
+revision, and complete-tree digest. The original eight CPython 3.11
+requirement-set hashes remain frozen, while CPython 3.12 resolves through its
+own lock identity. This source-level closure validation does not replace the
 pending real-GPU and Modly UI workflow tests described under Release status.
 
 Native and portable source archives are also size/SHA-256 pinned. Their

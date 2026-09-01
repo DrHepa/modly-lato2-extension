@@ -2,7 +2,7 @@
   "id": "modly-lato2-extension",
   "name": "LATO.2 for Modly",
   "type": "process",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "DrHepa",
   "description": "Run complete LATO.2 end-to-end, vertex-flow, vertex-autoencoder, and topology-flow inference on one mesh.",
   "source": "https://github.com/DrHepa/modly-lato2-extension",

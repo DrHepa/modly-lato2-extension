@@ -456,15 +456,10 @@ def validate_context(payload: Mapping[str, object], root: Path = ROOT) -> SetupC
         payload.get("accelerator") or ("cuda" if gpu_sm > 0 else "cpu")
     ).strip().casefold()
     host_fingerprint = interpreter_fingerprint(python_exe)
-    if (
-        host_fingerprint.get("implementation") != "cpython"
-        or host_fingerprint.get("version") != [3, 11]
-        or host_fingerprint.get("pointer_bits") != 64
-    ):
-        raise SetupFailure(
-            "PYTHON_ABI_UNSUPPORTED",
-            "this LATO.2 release requires Modly's 64-bit CPython 3.11 runtime",
-        )
+    try:
+        deps.python_abi_from_fingerprint(host_fingerprint)
+    except deps.DependencyError as exc:
+        raise SetupFailure(exc.code, exc.public_message) from exc
 
     normalized = dict(payload)
     normalized.update(
@@ -1207,7 +1202,11 @@ def _run_setup_locked(context: SetupContext) -> Path:
         or os.environ.get("MODLY_LATO2_DEPENDENCY_PROFILE")
         or "auto"
     )
-    plan = deps.select_dependency_plan(context.payload, requested_profile=requested_profile)
+    plan = deps.select_dependency_plan(
+        context.payload,
+        requested_profile=requested_profile,
+        interpreter_fingerprint=context.host_fingerprint,
+    )
     log(
         f"selected dependency profile={plan.profile}, torch={plan.torch_lane}, "
         f"attention={plan.attention_backend}"
@@ -1266,6 +1265,8 @@ def _run_setup_locked(context: SetupContext) -> Path:
                     else ["auto", "float16"]
                 ),
                 "dependency_profile": plan.profile,
+                "python_lane": plan.python_abi.lane,
+                "python_abi": plan.python_abi.payload(),
                 "dependency_lock_digest": deps.dependency_lock_digest(plan),
                 "dependency_support_level": plan.support_level,
                 "torch_lane": plan.torch_lane,

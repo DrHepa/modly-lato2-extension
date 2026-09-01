@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import replace
 import hashlib
 import json
@@ -7,11 +8,25 @@ import os
 from pathlib import Path
 import subprocess
 import stat
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
 from lato2_modly import dependencies as deps
+
+
+def python_fingerprint(minor: int, *, arch: str = "x86_64") -> dict[str, object]:
+    return {
+        "implementation": "cpython",
+        "version": [3, minor],
+        "cache_tag": f"cpython-3{minor}",
+        "abiflags": "",
+        "soabi": f"cpython-3{minor}-{arch}-linux-gnu",
+        "platform": f"linux-{arch}",
+        "machine": arch,
+        "pointer_bits": 64,
+    }
 
 
 def context(
@@ -28,6 +43,147 @@ def context(
         "cuda_version": cuda,
         "accelerator": "cuda",
     }
+
+
+def fake_venv_python(root: Path, *, symlink: bool = False) -> Path:
+    venv = root / "venv.__modly_staging"
+    (venv / "pyvenv.cfg").parent.mkdir(parents=True, exist_ok=True)
+    (venv / "pyvenv.cfg").write_text(
+        "include-system-site-packages = false\n", encoding="utf-8"
+    )
+    python = venv / "bin/python"
+    python.parent.mkdir()
+    if symlink:
+        try:
+            python.symlink_to(Path(sys.executable).resolve())
+        except OSError as exc:
+            raise unittest.SkipTest(f"executable symlinks unavailable: {exc}") from exc
+    else:
+        python.touch()
+    return python
+
+
+def _record_digest(data: bytes) -> str:
+    return base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode(
+        "ascii"
+    )
+
+
+def compact_cusparselt_contract(
+    *,
+    metadata_name: str = "nvidia-cusparselt-cu12",
+    metadata_version: str = "0.7.1",
+    elf_machine: int = 183,
+    empty_library: bool = False,
+) -> tuple[object, dict[str, bytes], bytes, bytes]:
+    dist_info = "nvidia_cusparselt_cu12-0.7.1.dist-info"
+    package_root = "nvidia/cusparselt"
+    library = b"" if empty_library else bytearray(64)
+    if isinstance(library, bytearray):
+        library[:6] = b"\x7fELF\x02\x01"
+        library[6] = 1
+        library[18:20] = elf_machine.to_bytes(2, "little")
+        library = bytes(library)
+    original_wheel = (
+        b"Wheel-Version: 1.0\n"
+        b"Generator: setuptools (75.8.0)\n"
+        b"Root-Is-Purelib: true\n"
+        b"Tag: py3-none-manylinux2014_sbsa\n\n"
+    )
+    normalized_wheel = original_wheel.replace(
+        b"manylinux2014_sbsa", b"manylinux2014_aarch64"
+    )
+    contents = {
+        f"{package_root}/LICENSE.txt": b"license\n",
+        f"{package_root}/include/cusparseLt.h": b"header\n",
+        f"{package_root}/lib/libcusparseLt.so.0": library,
+        f"{dist_info}/INSTALLER": b"pip\n",
+        f"{dist_info}/METADATA": (
+            b"Metadata-Version: 2.1\n"
+            + f"Name: {metadata_name}\n".encode("ascii")
+            + f"Version: {metadata_version}\n".encode("ascii")
+        ),
+        f"{dist_info}/top_level.txt": b"nvidia/cusparselt\n",
+    }
+    wheel_path = f"{dist_info}/WHEEL"
+    record_path = f"{dist_info}/RECORD"
+    record_order = (
+        f"{package_root}/LICENSE.txt",
+        f"{package_root}/include/cusparseLt.h",
+        f"{package_root}/lib/libcusparseLt.so.0",
+        f"{dist_info}/INSTALLER",
+        f"{dist_info}/METADATA",
+        record_path,
+        wheel_path,
+        f"{dist_info}/top_level.txt",
+    )
+
+    def make_record(wheel: bytes) -> bytes:
+        rows = []
+        for relative in record_order:
+            if relative == record_path:
+                rows.append(f"{relative},,")
+                continue
+            data = wheel if relative == wheel_path else contents[relative]
+            rows.append(f"{relative},sha256={_record_digest(data)},{len(data)}")
+        return ("\r\n".join(rows) + "\r\n").encode("ascii")
+
+    original_record = make_record(original_wheel)
+    normalized_record = make_record(normalized_wheel)
+    contract = deps._CusparseLtNormalizationContract(
+        schema="test.cusparselt-normalization.v1",
+        distribution="nvidia-cusparselt-cu12",
+        version="0.7.1",
+        dist_info=dist_info,
+        package_root=package_root,
+        library_relative=f"{package_root}/lib/libcusparseLt.so.0",
+        metadata_relative=f"{dist_info}/METADATA",
+        wheel_relative=wheel_path,
+        record_relative=record_path,
+        package_directories=("include", "lib"),
+        record_order=record_order,
+        fixed_files=tuple(
+            (relative, hashlib.sha256(data).hexdigest(), len(data))
+            for relative, data in contents.items()
+        ),
+        original_wheel=original_wheel,
+        normalized_wheel=normalized_wheel,
+        original_record_sha256=hashlib.sha256(original_record).hexdigest(),
+        normalized_record_sha256=hashlib.sha256(normalized_record).hexdigest(),
+    )
+    return contract, contents, original_record, normalized_record
+
+
+def fake_cusparselt_distribution(
+    root: Path,
+    minor: int,
+    *,
+    bundle: tuple[object, dict[str, bytes], bytes, bytes] | None = None,
+    state: str = "original",
+) -> tuple[Path, object, Path, bytes, bytes]:
+    contract, contents, original_record, normalized_record = (
+        compact_cusparselt_contract() if bundle is None else bundle
+    )
+    python = fake_venv_python(root)
+    site_packages = (
+        python.parent.parent / "lib" / f"python3.{minor}" / "site-packages"
+    )
+    for relative, data in contents.items():
+        target = site_packages / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    wheel = site_packages / contract.wheel_relative
+    record = site_packages / contract.record_relative
+    wheel.parent.mkdir(parents=True, exist_ok=True)
+    if state in {"normalized", "hybrid-wheel"}:
+        wheel.write_bytes(contract.normalized_wheel)
+    else:
+        wheel.write_bytes(contract.original_wheel)
+    if state in {"normalized", "hybrid-record"}:
+        record.write_bytes(normalized_record)
+    else:
+        record.write_bytes(original_record)
+    return python, contract, site_packages, original_record, normalized_record
 
 
 class PlanSelectionTests(unittest.TestCase):
@@ -106,7 +262,470 @@ class PlanSelectionTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "CUDA_REQUIRED")
 
 
+class CusparseLtNormalizationTests(unittest.TestCase):
+    @staticmethod
+    def plan(minor: int = 12):
+        return deps.select_dependency_plan(
+            context(arch="aarch64", sm=120, cuda=128),
+            "portable",
+            interpreter_fingerprint=python_fingerprint(minor, arch="aarch64"),
+        )
+
+    def test_lock_and_state_record_the_exact_pre_and_post_identity(self) -> None:
+        for minor in (11, 12):
+            with self.subTest(minor=minor):
+                plan = self.plan(minor)
+                identity = deps.dependency_lock_payload(plan)[
+                    "installedMetadataNormalization"
+                ]
+                self.assertEqual(identity["distribution"], "nvidia-cusparselt-cu12")
+                self.assertEqual(identity["version"], "0.7.1")
+                self.assertEqual(identity["pythonLanes"], ["cp311", "cp312"])
+                self.assertEqual(
+                    identity["wheel"]["beforeSha256"],
+                    "6277516b4579f35a685c012370b1634b4d7f3a904f2aa91885c04006ab56253c",
+                )
+                self.assertEqual(
+                    identity["wheel"]["afterSha256"],
+                    "080008623ebbde6f36b884ca554ca80d6dcd11fd54f653bda9879669674afb0f",
+                )
+                state = deps.dependency_state_payload(
+                    plan, python_fingerprint(minor, arch="aarch64")
+                )
+                self.assertEqual(state["installedMetadataNormalization"], identity)
+
+    def test_production_contract_snapshots_every_fixed_file_and_record_hash(self) -> None:
+        contract = deps._CUSPARSELT_NORMALIZATION_CONTRACT
+        self.assertEqual(
+            contract.fixed_files,
+            (
+                (
+                    "nvidia/cusparselt/LICENSE.txt",
+                    "e8d158885a681b95ec7a6fc06dd8d4a52989f374cb1380c8a4c8fb27fd3d5d5e",
+                    17948,
+                ),
+                (
+                    "nvidia/cusparselt/include/cusparseLt.h",
+                    "74580d3104ed58e1708d2ee746f65c2a9e1557f91b1d158d2d93c1591e118c38",
+                    17876,
+                ),
+                (
+                    "nvidia/cusparselt/lib/libcusparseLt.so.0",
+                    "2c677e678d1955a6dedd66274dfe4cc0f930fea6421f1b8a5ec08cbb1ea18b17",
+                    440496193,
+                ),
+                (
+                    "nvidia_cusparselt_cu12-0.7.1.dist-info/INSTALLER",
+                    "ceebae7b8927a3227e5303cf5e0f1f7b34bb542ad7250ac03fbcde36ec2f1508",
+                    4,
+                ),
+                (
+                    "nvidia_cusparselt_cu12-0.7.1.dist-info/METADATA",
+                    "b264cea6951b70b52a3fd2ffaa88f9109eaf379633aa8d6e0832ecc92ddf6fba",
+                    6974,
+                ),
+                (
+                    "nvidia_cusparselt_cu12-0.7.1.dist-info/top_level.txt",
+                    "a1f202f9d6cad2cdb68cde79b207d5a5b847593eb765d24b59e49be8aff5f812",
+                    18,
+                ),
+            ),
+        )
+        original_record, normalized_record = deps._validate_cusparselt_contract(
+            contract
+        )
+        self.assertEqual(len(original_record), 754)
+        self.assertEqual(len(normalized_record), 754)
+        self.assertEqual(
+            hashlib.sha256(original_record).hexdigest(),
+            "e02265be65d5f1aab74b97ffd2d53ca2ccf9d41ba0ca9cddf8d9b4bd34262425",
+        )
+        self.assertEqual(
+            hashlib.sha256(normalized_record).hexdigest(),
+            "54b7063009a7cb86f1a0b2dd0bc0af777f8946440084365671e1745a1d61a976",
+        )
+
+    def test_normalizes_only_wheel_and_its_record_row_for_both_python_lanes(self) -> None:
+        for minor in (11, 12):
+            with self.subTest(minor=minor), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                python, contract, site, original_record, normalized_record = (
+                    fake_cusparselt_distribution(root, minor)
+                )
+                original_metadata = (site / contract.metadata_relative).read_bytes()
+                with mock.patch.object(
+                    deps, "_CUSPARSELT_NORMALIZATION_CONTRACT", contract
+                ):
+                    report = deps.normalize_cusparselt_metadata(
+                        python,
+                        self.plan(minor),
+                        _cdll_loader=lambda _path: object(),
+                    )
+                self.assertTrue(report["applied"])
+                self.assertEqual(
+                    (site / contract.wheel_relative).read_bytes(),
+                    contract.normalized_wheel,
+                )
+                self.assertEqual(
+                    (site / contract.record_relative).read_bytes(), normalized_record
+                )
+                self.assertNotEqual(original_record, normalized_record)
+                self.assertEqual(
+                    (site / contract.metadata_relative).read_bytes(), original_metadata
+                )
+                changed_rows = [
+                    (before, after)
+                    for before, after in zip(
+                        original_record.splitlines(), normalized_record.splitlines()
+                    )
+                    if before != after
+                ]
+                self.assertEqual(len(changed_rows), 1)
+                self.assertIn(b".dist-info/WHEEL,", changed_rows[0][0])
+
+    def test_exact_final_state_is_idempotent_without_replacing_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            python, contract, _site, _before, _after = fake_cusparselt_distribution(
+                root, 12, state="normalized"
+            )
+            with mock.patch.object(
+                deps, "_CUSPARSELT_NORMALIZATION_CONTRACT", contract
+            ), mock.patch.object(deps.os, "replace", wraps=os.replace) as replace_file:
+                report = deps.normalize_cusparselt_metadata(
+                    python,
+                    self.plan(),
+                    _cdll_loader=lambda _path: object(),
+                )
+            self.assertFalse(report["applied"])
+            replace_file.assert_not_called()
+
+    def test_library_swap_cannot_change_the_inode_loaded_after_hashing(self) -> None:
+        loaded: list[bytes] = []
+        loader_paths: list[str] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            python, contract, site, _before, _after = fake_cusparselt_distribution(
+                root, 12
+            )
+            library = site / contract.library_relative
+            original = library.read_bytes()
+            replacement = root / "same-size-replacement.so"
+            replacement.write_bytes(b"X" * len(original))
+
+            def racing_loader(path):
+                loader_paths.append(str(path))
+                os.replace(replacement, library)
+                loaded.append(Path(path).read_bytes())
+                return object()
+
+            with mock.patch.object(
+                deps, "_CUSPARSELT_NORMALIZATION_CONTRACT", contract
+            ), self.assertRaises(deps.DependencyError):
+                deps.normalize_cusparselt_metadata(
+                    python, self.plan(), _cdll_loader=racing_loader
+                )
+        self.assertEqual(loaded, [original])
+        self.assertEqual(len(loader_paths), 1)
+        self.assertTrue(loader_paths[0].startswith("/proc/self/fd/"))
+
+    def test_dist_info_swap_cannot_redirect_atomic_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            python, contract, site, _before, _after = fake_cusparselt_distribution(
+                root, 12
+            )
+            dist_info = site / contract.dist_info
+            parked = root / "parked-dist-info"
+            outside = root / "outside-dist-info"
+            outside.mkdir()
+            outside_wheel = outside / "WHEEL"
+            outside_wheel.write_bytes(b"outside-sentinel")
+            original_replace = os.replace
+            raced = False
+            replace_kwargs: list[dict[str, object]] = []
+
+            def racing_replace(source, destination, *args, **kwargs):
+                nonlocal raced
+                replace_kwargs.append(dict(kwargs))
+                if not raced:
+                    raced = True
+                    dist_info.rename(parked)
+                    try:
+                        dist_info.symlink_to(outside, target_is_directory=True)
+                    except OSError as exc:
+                        raise unittest.SkipTest(
+                            f"directory symlinks unavailable: {exc}"
+                        ) from exc
+                    source_name = Path(source).name
+                    (outside / source_name).write_bytes(
+                        (parked / source_name).read_bytes()
+                    )
+                return original_replace(source, destination, *args, **kwargs)
+
+            with mock.patch.object(
+                deps, "_CUSPARSELT_NORMALIZATION_CONTRACT", contract
+            ), mock.patch.object(deps.os, "replace", side_effect=racing_replace), self.assertRaises(
+                deps.DependencyError
+            ):
+                deps.normalize_cusparselt_metadata(
+                    python, self.plan(), _cdll_loader=lambda _path: object()
+                )
+            self.assertTrue(raced)
+            self.assertEqual(outside_wheel.read_bytes(), b"outside-sentinel")
+            self.assertTrue(replace_kwargs)
+            self.assertEqual(
+                replace_kwargs[0]["src_dir_fd"], replace_kwargs[0]["dst_dir_fd"]
+            )
+
+    def test_synthetic_pip_check_returns_zero_only_after_normalization(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            python, contract, site, _before, _after = fake_cusparselt_distribution(
+                root, 12
+            )
+            wheel = site / contract.wheel_relative
+            python.write_text(
+                f"#!{sys.executable}\n"
+                "from pathlib import Path\n"
+                "import sys\n"
+                f"wheel = Path({str(wheel)!r})\n"
+                f"expected = {contract.normalized_wheel!r}\n"
+                "sys.exit(0 if sys.argv[-1] == 'check' and wheel.read_bytes() == expected else 9)\n",
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
+            command = deps.isolated_pip_command(python, ["check"], {})
+            self.assertNotEqual(
+                subprocess.run(command, check=False).returncode,
+                0,
+            )
+            with mock.patch.object(
+                deps, "_CUSPARSELT_NORMALIZATION_CONTRACT", contract
+            ):
+                deps.normalize_cusparselt_metadata(
+                    python, self.plan(), _cdll_loader=lambda _path: object()
+                )
+            subprocess.run(command, check=True)
+
+    def test_non_applicable_platform_architecture_and_torch_lane_are_noops(self) -> None:
+        plans = (
+            replace(self.plan(), system="win32"),
+            deps.select_dependency_plan(
+                context(arch="x64", sm=120, cuda=128),
+                "portable",
+                interpreter_fingerprint=python_fingerprint(12),
+            ),
+            deps.select_dependency_plan(
+                context(arch="aarch64", sm=90, cuda=126),
+                "portable",
+                interpreter_fingerprint=python_fingerprint(12, arch="aarch64"),
+            ),
+        )
+        for plan in plans:
+            with self.subTest(system=plan.system, arch=plan.arch, lane=plan.torch_lane):
+                self.assertIsNone(
+                    deps.normalize_cusparselt_metadata(Path("/missing/bin/python"), plan)
+                )
+
+    def _assert_rejected(
+        self,
+        *,
+        bundle=None,
+        state: str = "original",
+        mutate=None,
+        loader=None,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            python, contract, site, _before, _after = fake_cusparselt_distribution(
+                root, 12, bundle=bundle, state=state
+            )
+            if mutate is not None:
+                mutate(root, site, contract)
+            with mock.patch.object(
+                deps, "_CUSPARSELT_NORMALIZATION_CONTRACT", contract
+            ), self.assertRaises(deps.DependencyError):
+                deps.normalize_cusparselt_metadata(
+                    python,
+                    self.plan(),
+                    _cdll_loader=(lambda _path: object()) if loader is None else loader,
+                )
+
+    def test_rejects_wrong_distribution_version_tag_hash_and_file_set(self) -> None:
+        self._assert_rejected(
+            bundle=compact_cusparselt_contract(metadata_name="different-package")
+        )
+        self._assert_rejected(
+            bundle=compact_cusparselt_contract(metadata_version="0.7.0")
+        )
+        self._assert_rejected(
+            mutate=lambda _root, site, contract: (
+                site / contract.wheel_relative
+            ).write_bytes(contract.original_wheel.replace(b"sbsa", b"arm64"))
+        )
+        self._assert_rejected(
+            mutate=lambda _root, site, contract: (
+                site / contract.package_root / "LICENSE.txt"
+            ).write_bytes(b"tampered\n")
+        )
+
+        def add_file(_root, site, contract):
+            (site / contract.package_root / "unexpected.txt").write_text(
+                "unexpected", encoding="utf-8"
+            )
+
+        self._assert_rejected(mutate=add_file)
+
+    def test_rejects_symlinks_hardlinks_record_escape_and_duplicates(self) -> None:
+        def install_symlink(root, site, contract):
+            target = site / contract.package_root / "include/cusparseLt.h"
+            target.unlink()
+            outside = root / "outside-header"
+            outside.write_bytes(b"header\n")
+            try:
+                target.symlink_to(outside)
+            except OSError as exc:
+                raise unittest.SkipTest(f"symlinks unavailable: {exc}") from exc
+
+        self._assert_rejected(mutate=install_symlink)
+
+        def hardlink_file(root, site, contract):
+            target = site / contract.package_root / "LICENSE.txt"
+            try:
+                os.link(target, root / "outside-hardlink")
+            except OSError as exc:
+                raise unittest.SkipTest(f"hardlinks unavailable: {exc}") from exc
+
+        self._assert_rejected(mutate=hardlink_file)
+
+        def unsafe_record(_root, site, contract):
+            record = site / contract.record_relative
+            record.write_bytes(b"../escape,sha256=AAAA,1\r\n" + record.read_bytes())
+
+        self._assert_rejected(mutate=unsafe_record)
+
+        def duplicate_record(_root, site, contract):
+            record = site / contract.record_relative
+            first = record.read_bytes().splitlines(keepends=True)[0]
+            record.write_bytes(first + record.read_bytes())
+
+        self._assert_rejected(mutate=duplicate_record)
+
+    def test_rejects_empty_or_wrong_elf_and_dlopen_failure(self) -> None:
+        self._assert_rejected(bundle=compact_cusparselt_contract(empty_library=True))
+        self._assert_rejected(bundle=compact_cusparselt_contract(elf_machine=62))
+
+        def fail_dlopen(_path):
+            raise OSError("cannot load")
+
+        self._assert_rejected(loader=fail_dlopen)
+
+    def test_rejects_both_hybrid_states(self) -> None:
+        for state in ("hybrid-wheel", "hybrid-record"):
+            with self.subTest(state=state):
+                self._assert_rejected(state=state)
+
+    def test_install_normalizes_after_torch_and_before_mandatory_pip_check(self) -> None:
+        events: list[str] = []
+        plan = self.plan()
+
+        def runner(command, _env):
+            if plan.torch_requirements[0] in command:
+                events.append("torch")
+            if command[-1] == "check":
+                events.append("pip-check")
+                raise subprocess.CalledProcessError(1, command)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            python = fake_venv_python(root)
+            with mock.patch.object(deps, "_assert_target_python"), mock.patch.object(
+                deps, "_validate_linux_glibc"
+            ), mock.patch.object(
+                deps,
+                "normalize_cusparselt_metadata",
+                side_effect=lambda *_args, **_kwargs: events.append("normalize"),
+            ), mock.patch.object(deps, "verify_dependencies") as verify:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    deps.install_dependencies(
+                        python,
+                        plan,
+                        root / "cache",
+                        runner=runner,
+                        log=lambda _message: None,
+                    )
+        self.assertEqual(events, ["torch", "normalize", "pip-check"])
+        verify.assert_not_called()
+
+
 class LockAndStateTests(unittest.TestCase):
+    def test_dependency_lock_is_partitioned_by_python_abi(self) -> None:
+        payload = context(arch="arm64", sm=120, cuda=128)
+        cp311 = deps.select_dependency_plan(
+            payload,
+            "portable",
+            interpreter_fingerprint=python_fingerprint(11, arch="aarch64"),
+        )
+        cp312 = deps.select_dependency_plan(
+            payload,
+            "portable",
+            interpreter_fingerprint=python_fingerprint(12, arch="aarch64"),
+        )
+
+        self.assertEqual(cp311.python_abi.lane, "cp311")
+        self.assertEqual(cp312.python_abi.lane, "cp312")
+        self.assertEqual(
+            deps.dependency_lock_payload(cp311)["plan"]["python"]["version"],
+            [3, 11],
+        )
+        self.assertEqual(
+            deps.dependency_lock_payload(cp312)["plan"]["python"]["cacheTag"],
+            "cpython-312",
+        )
+        self.assertNotEqual(
+            deps.dependency_lock_digest(cp311), deps.dependency_lock_digest(cp312)
+        )
+        cp311_lane = deps.PYTHON_REQUIREMENT_LANES["cp311"]
+        cp312_lane = deps.PYTHON_REQUIREMENT_LANES["cp312"]
+        for field in (
+            "bootstrap",
+            "base",
+            "common_transitive",
+            "x64_render",
+            "x64_render_common",
+            "linux_x64_render",
+            "windows_x64_render",
+            "torch_lanes",
+            "torch_indexes",
+            "torch_common",
+            "torch_platform",
+            "exact_sparse",
+            "exact_native",
+        ):
+            with self.subTest(field=field):
+                self.assertIsNot(getattr(cp311_lane, field), getattr(cp312_lane, field))
+        legacy = (
+            "\n".join(sorted(deps.constraint_requirements(cp311))) + "\n"
+        ).encode("utf-8")
+        self.assertEqual(
+            hashlib.sha256(legacy).hexdigest(),
+            "89b6129130207920f4e8a4ea49c9c0971eafff2c56d0fc55a4776028dee24629",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = Path(temporary).resolve()
+            cp311_constraints = deps.materialize_dependency_constraints(cache, cp311)
+            cp312_constraints = deps.materialize_dependency_constraints(cache, cp312)
+            self.assertNotEqual(cp311_constraints, cp312_constraints)
+            self.assertIn(
+                deps.dependency_lock_digest(cp311).encode("ascii"),
+                cp311_constraints.read_bytes(),
+            )
+            self.assertIn(
+                deps.dependency_lock_digest(cp312).encode("ascii"),
+                cp312_constraints.read_bytes(),
+            )
+
     def test_complete_constraints_are_platform_and_torch_lane_specific(self) -> None:
         linux_cu124 = deps.select_dependency_plan(context(sm=75), "portable")
         windows_cu124 = deps.select_dependency_plan(
@@ -175,37 +794,10 @@ class LockAndStateTests(unittest.TestCase):
         self.assertEqual(len({deps.dependency_lock_digest(p) for p in expected_counts}), 7)
 
     def test_complete_constraints_match_recursive_official_metadata_snapshots(self) -> None:
-        # Frozen from recursive uv CPython 3.11 resolutions against PyPI,
-        # download.pytorch.org and the exact PyG wheel page.  Hashing every
-        # sorted requirement catches an omission that a package count cannot.
-        plans = {
-            "linux-x64-cu124-portable": deps.select_dependency_plan(
-                context(sm=75), "portable"
-            ),
-            "linux-x64-cu124-exact": deps.select_dependency_plan(
-                context(sm=86), "exact-upstream"
-            ),
-            "win32-x64-cu124-portable": deps.select_dependency_plan(
-                context(system="win32", arch="x64", sm=75), "portable"
-            ),
-            "win32-x64-cu124-exact": deps.select_dependency_plan(
-                context(system="win32", arch="x64", sm=86), "exact-upstream"
-            ),
-            "linux-arm64-cu126": deps.select_dependency_plan(
-                context(arch="arm64", sm=90, cuda=126), "portable"
-            ),
-            "linux-x64-cu128": deps.select_dependency_plan(
-                context(arch="x64", sm=120, cuda=128), "portable"
-            ),
-            "win32-x64-cu128": deps.select_dependency_plan(
-                context(system="win32", arch="x64", sm=120, cuda=128),
-                "portable",
-            ),
-            "linux-arm64-cu128": deps.select_dependency_plan(
-                context(arch="arm64", sm=120, cuda=128), "portable"
-            ),
-        }
-        expected = {
+        # These hashes freeze the original cp311 requirement sets.  The new
+        # cp312 lane is resolved independently and must preserve the same
+        # audited versions until its own metadata requires an intentional fork.
+        expected_cp311 = {
             "linux-x64-cu124-portable": "15a0e9f6a237d7248d335ad016012a720cd527be51fe5ca182c17bad5741ca40",
             "linux-x64-cu124-exact": "ca1053f2ca5856caa0c4910d9423dfe652c47402c8db1beb427e8995107d6923",
             "win32-x64-cu124-portable": "297bedec9332cf2f5f63241e5f7d9d9d6a62b3ea95e07f7d181ddeaae485b129",
@@ -215,11 +807,79 @@ class LockAndStateTests(unittest.TestCase):
             "win32-x64-cu128": "2d40eb733066ba82b57966c275c0b811ca9714de1c0a0f5ff69145b9dc4ff16b",
             "linux-arm64-cu128": "89b6129130207920f4e8a4ea49c9c0971eafff2c56d0fc55a4776028dee24629",
         }
-        for name, plan in plans.items():
-            serialized = (
-                "\n".join(sorted(deps.constraint_requirements(plan))) + "\n"
-            ).encode("utf-8")
-            self.assertEqual(hashlib.sha256(serialized).hexdigest(), expected[name])
+        expected_cp312 = {
+            "linux-x64-cu124-portable": "15a0e9f6a237d7248d335ad016012a720cd527be51fe5ca182c17bad5741ca40",
+            "linux-x64-cu124-exact": "ca1053f2ca5856caa0c4910d9423dfe652c47402c8db1beb427e8995107d6923",
+            "win32-x64-cu124-portable": "297bedec9332cf2f5f63241e5f7d9d9d6a62b3ea95e07f7d181ddeaae485b129",
+            "win32-x64-cu124-exact": "d4b7573a301797e76b690d2c3d97ff123ebd529f382d8beca14f64adf77048c2",
+            "linux-arm64-cu126": "9e76edb3b0b594869bda25ea6f743dac5b3c6fa08136568cc84744f53f163165",
+            "linux-x64-cu128": "4fb1d46987a126c04cd93b620cf7a4a4128a2fbfd7af86e3cf674faccbbdf849",
+            "win32-x64-cu128": "2d40eb733066ba82b57966c275c0b811ca9714de1c0a0f5ff69145b9dc4ff16b",
+            "linux-arm64-cu128": "89b6129130207920f4e8a4ea49c9c0971eafff2c56d0fc55a4776028dee24629",
+        }
+
+        def plans_for(minor: int) -> dict[str, deps.DependencyPlan]:
+            fingerprint = python_fingerprint(minor)
+            arm_fingerprint = python_fingerprint(minor, arch="aarch64")
+            return {
+                "linux-x64-cu124-portable": deps.select_dependency_plan(
+                    context(sm=75), "portable", interpreter_fingerprint=fingerprint
+                ),
+                "linux-x64-cu124-exact": deps.select_dependency_plan(
+                    context(sm=86),
+                    "exact-upstream",
+                    interpreter_fingerprint=fingerprint,
+                ),
+                "win32-x64-cu124-portable": deps.select_dependency_plan(
+                    context(system="win32", arch="x64", sm=75),
+                    "portable",
+                    interpreter_fingerprint=fingerprint,
+                ),
+                "win32-x64-cu124-exact": deps.select_dependency_plan(
+                    context(system="win32", arch="x64", sm=86),
+                    "exact-upstream",
+                    interpreter_fingerprint=fingerprint,
+                ),
+                "linux-arm64-cu126": deps.select_dependency_plan(
+                    context(arch="arm64", sm=90, cuda=126),
+                    "portable",
+                    interpreter_fingerprint=arm_fingerprint,
+                ),
+                "linux-x64-cu128": deps.select_dependency_plan(
+                    context(arch="x64", sm=120, cuda=128),
+                    "portable",
+                    interpreter_fingerprint=fingerprint,
+                ),
+                "win32-x64-cu128": deps.select_dependency_plan(
+                    context(system="win32", arch="x64", sm=120, cuda=128),
+                    "portable",
+                    interpreter_fingerprint=fingerprint,
+                ),
+                "linux-arm64-cu128": deps.select_dependency_plan(
+                    context(arch="arm64", sm=120, cuda=128),
+                    "portable",
+                    interpreter_fingerprint=arm_fingerprint,
+                ),
+            }
+
+        by_python = {minor: plans_for(minor) for minor in (11, 12)}
+        expected_by_python = {11: expected_cp311, 12: expected_cp312}
+        for minor, plans in by_python.items():
+            for name, plan in plans.items():
+                with self.subTest(python=f"3.{minor}", plan=name):
+                    serialized = (
+                        "\n".join(sorted(deps.constraint_requirements(plan))) + "\n"
+                    ).encode("utf-8")
+                    self.assertEqual(
+                        hashlib.sha256(serialized).hexdigest(),
+                        expected_by_python[minor][name],
+                    )
+                    self.assertEqual(plan.python_abi.lane, f"cp3{minor}")
+        for name in expected_cp311:
+            self.assertNotEqual(
+                deps.dependency_lock_digest(by_python[11][name]),
+                deps.dependency_lock_digest(by_python[12][name]),
+            )
 
     def test_exact_constraints_include_native_metadata_and_sparse_closure(self) -> None:
         plan = deps.select_dependency_plan(context(sm=86), "exact-upstream")
@@ -632,6 +1292,7 @@ class SubprocessEnvironmentTests(unittest.TestCase):
     def test_isolated_pip_keeps_only_valid_shared_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
+            python = fake_venv_python(root)
             cache = root / "pip-cache"
             cache.mkdir()
             env = deps.sanitize_subprocess_environment(
@@ -643,7 +1304,7 @@ class SubprocessEnvironmentTests(unittest.TestCase):
                 allow_network=True,
             )
             command = deps.isolated_pip_command(
-                Path("/venv/python"),
+                python,
                 ["install", "--index-url", deps.PYPI_INDEX, "wheel==0.45.1"],
                 env,
             )
@@ -654,10 +1315,11 @@ class SubprocessEnvironmentTests(unittest.TestCase):
                 alias = None
             alias_env = {"PIP_CACHE_DIR": str(alias)} if alias is not None else {}
             alias_command = deps.isolated_pip_command(
-                Path("/venv/python"), ["check"], alias_env
+                python, ["check"], alias_env
             )
 
         self.assertEqual(command[1:3], ["-m", "pip"])
+        self.assertEqual(command[0], str(python))
         self.assertIn("--isolated", command)
         self.assertIn("--disable-pip-version-check", command)
         self.assertIn("--no-input", command)
@@ -666,6 +1328,51 @@ class SubprocessEnvironmentTests(unittest.TestCase):
         self.assertNotIn("https://evil.invalid/simple", command)
         self.assertNotIn("--cache-dir", alias_command)
 
+    @unittest.skipIf(os.name == "nt", "POSIX venv executables are symlinks")
+    def test_install_keeps_staging_venv_symlink_as_pip_executable(self) -> None:
+        plan = deps.select_dependency_plan(
+            context(arch="arm64", sm=90, cuda=126), "portable"
+        )
+        commands: list[list[str]] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            python = fake_venv_python(root, symlink=True)
+            base_python = python.resolve(strict=True)
+            cache = root / "cache"
+            with mock.patch.object(
+                deps, "_assert_target_python"
+            ), mock.patch.object(deps, "_validate_linux_glibc"), mock.patch.object(
+                deps, "verify_dependencies", return_value={"ok": True}
+            ):
+                deps.install_dependencies(
+                    python,
+                    plan,
+                    cache,
+                    runner=lambda command, _env: commands.append(list(command)),
+                    log=lambda _message: None,
+                )
+
+        self.assertTrue(commands)
+        self.assertTrue(all(command[0] == str(python) for command in commands))
+        self.assertTrue(all(command[0] != str(base_python) for command in commands))
+
+    def test_pip_rejects_python_outside_a_regular_venv_container(self) -> None:
+        with self.assertRaises(deps.DependencyError) as system_python:
+            deps.isolated_pip_command(Path(sys.executable), ["check"], {})
+        self.assertEqual(system_python.exception.code, "PYTHON_PATH_INVALID")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            python = fake_venv_python(root)
+            alias = root / "aliased-venv"
+            try:
+                alias.symlink_to(python.parent.parent, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlinks unavailable: {exc}")
+            with self.assertRaises(deps.DependencyError) as aliased:
+                deps.isolated_pip_command(alias / "bin/python", ["check"], {})
+        self.assertEqual(aliased.exception.code, "PYTHON_PATH_INVALID")
+
     def test_install_falls_back_to_owned_pip_cache_without_following_alias(self) -> None:
         plan = deps.select_dependency_plan(
             context(arch="arm64", sm=90, cuda=126), "portable"
@@ -673,6 +1380,7 @@ class SubprocessEnvironmentTests(unittest.TestCase):
         commands: list[list[str]] = []
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
+            python = fake_venv_python(root)
             cache = root / "cache"
             outside = root / "outside"
             cache.mkdir()
@@ -690,7 +1398,7 @@ class SubprocessEnvironmentTests(unittest.TestCase):
                 deps, "verify_dependencies", return_value={"ok": True}
             ):
                 constraint = deps.install_dependencies(
-                    Path(__file__),
+                    python,
                     plan,
                     cache,
                     runner=lambda command, _env: commands.append(list(command)),
@@ -871,6 +1579,204 @@ class SourceCacheIntegrityTests(unittest.TestCase):
 
 
 class InstallPlanTests(unittest.TestCase):
+    def test_python_abi_accepts_supported_release_fingerprints(self) -> None:
+        fingerprints = [
+            python_fingerprint(minor, arch=arch)
+            for minor in (11, 12)
+            for arch in ("x86_64", "aarch64")
+        ]
+        fingerprints.extend(
+            {
+                "implementation": "cpython",
+                "version": [3, minor],
+                "cache_tag": f"cpython-3{minor}",
+                "abiflags": "",
+                "soabi": f"cp3{minor}-win_amd64",
+                "platform": "win-amd64",
+                "machine": "amd64",
+                "pointer_bits": 64,
+            }
+            for minor in (11, 12)
+        )
+
+        for fingerprint in fingerprints:
+            with self.subTest(fingerprint=fingerprint):
+                abi = deps.python_abi_from_fingerprint(fingerprint)
+                self.assertEqual(abi.version, tuple(fingerprint["version"]))
+
+    def test_python_abi_rejects_debug_and_incoherent_soabi(self) -> None:
+        release = python_fingerprint(12, arch="aarch64")
+        unsupported = (
+            {
+                **release,
+                "abiflags": "d",
+                "soabi": "cpython-312d-aarch64-linux-gnu",
+            },
+            {**release, "soabi": "not-a-python-abi"},
+        )
+        for fingerprint in unsupported:
+            with self.subTest(fingerprint=fingerprint):
+                with self.assertRaises(deps.DependencyError) as raised:
+                    deps.python_abi_from_fingerprint(fingerprint)
+                self.assertEqual(raised.exception.code, "PYTHON_ABI_UNSUPPORTED")
+
+    def test_target_python_accepts_only_matching_supported_cpython_abis(self) -> None:
+        base = {
+            "implementation": "cpython",
+            "abiflags": "",
+            "platform": "linux-aarch64",
+            "machine": "aarch64",
+            "pointer_bits": 64,
+        }
+        fingerprints = (
+            {
+                **base,
+                "version": [3, 11],
+                "cache_tag": "cpython-311",
+                "soabi": "cpython-311-aarch64-linux-gnu",
+            },
+            {
+                **base,
+                "version": [3, 12],
+                "cache_tag": "cpython-312",
+                "soabi": "cpython-312-aarch64-linux-gnu",
+            },
+        )
+        for fingerprint in fingerprints:
+            expected = deps.python_abi_from_fingerprint(fingerprint)
+            completed = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=json.dumps(fingerprint), stderr=""
+            )
+            with self.subTest(version=fingerprint["version"]), mock.patch.object(
+                deps.subprocess, "run", return_value=completed
+            ):
+                self.assertEqual(deps._assert_target_python(Path("/python"), expected), expected)
+
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps(fingerprints[1]), stderr=""
+        )
+        with mock.patch.object(deps.subprocess, "run", return_value=completed):
+            with self.assertRaises(deps.DependencyError) as raised:
+                deps._assert_target_python(
+                    Path("/python"), deps.python_abi_from_fingerprint(fingerprints[0])
+                )
+        self.assertEqual(raised.exception.code, "PYTHON_ABI_MISMATCH")
+
+        unsupported = {
+            **base,
+            "version": [3, 13],
+            "cache_tag": "cpython-313",
+            "soabi": "cpython-313-aarch64-linux-gnu",
+        }
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps(unsupported), stderr=""
+        )
+        with mock.patch.object(deps.subprocess, "run", return_value=completed):
+            with self.assertRaises(deps.DependencyError) as raised:
+                deps._assert_target_python(Path("/python"))
+        self.assertEqual(raised.exception.code, "PYTHON_ABI_UNSUPPORTED")
+
+    def test_exact_install_uses_only_the_selected_python_lane(self) -> None:
+        for minor in (11, 12):
+            lane_name = f"cp3{minor}"
+            marker_version = f"91.{minor}.0"
+            original_lane = deps.PYTHON_REQUIREMENT_LANES[lane_name]
+            replacement_by_name = {
+                "torch-scatter": f"torch-scatter=={marker_version}",
+                "xformers": f"xformers=={marker_version}",
+                "triton": f"triton=={marker_version}",
+                "flash-attn": f"flash-attn=={marker_version}",
+            }
+            lane = replace(
+                original_lane,
+                exact_sparse=(
+                    f"cumm-cu124=={marker_version}",
+                    f"spconv-cu124=={marker_version}",
+                ),
+                exact_native=tuple(
+                    (
+                        scope,
+                        replacement_by_name.get(
+                            deps._requirement_name(requirement), requirement
+                        ),
+                    )
+                    for scope, requirement in original_lane.exact_native
+                ),
+                torch_platform=tuple(
+                    (
+                        key,
+                        tuple(
+                            replacement_by_name.get(
+                                deps._requirement_name(requirement), requirement
+                            )
+                            for requirement in requirements
+                        ),
+                    )
+                    for key, requirements in original_lane.torch_platform
+                ),
+                torch_scatter_links=f"https://lane.invalid/{lane_name}",
+            )
+            commands: list[list[str]] = []
+
+            def runner(command, env):
+                del env
+                commands.append(list(command))
+
+            with self.subTest(lane=lane_name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                python = fake_venv_python(root)
+                cache = root / "cache"
+                native = cache / "native"
+                fake_sources = deps.NativeSources(
+                    native,
+                    native / "nvdiffrast",
+                    native / "CuMesh",
+                    native / "FlexGEMM",
+                    native / "o-voxel",
+                )
+                with mock.patch.dict(
+                    deps.PYTHON_REQUIREMENT_LANES, {lane_name: lane}
+                ), mock.patch.object(deps, "_assert_target_python"), mock.patch.object(
+                    deps, "_validate_linux_glibc"
+                ), mock.patch.object(
+                    deps,
+                    "native_build_environment",
+                    return_value={"PATH": "/usr/bin:/bin"},
+                ), mock.patch.object(
+                    deps, "prepare_native_sources", return_value=fake_sources
+                ), mock.patch.object(
+                    deps,
+                    "prepare_build_workspace",
+                    side_effect=lambda source, _cache, _plan, _purpose: source,
+                ), mock.patch.object(
+                    deps, "verify_dependencies", return_value={"ok": True}
+                ):
+                    plan = deps.select_dependency_plan(
+                        context(sm=86),
+                        "exact-upstream",
+                        interpreter_fingerprint=python_fingerprint(minor),
+                    )
+                    deps.install_dependencies(
+                        python, plan, cache, runner=runner, log=lambda _: None
+                    )
+
+            flat = "\n".join(" ".join(command) for command in commands)
+            for expected in (
+                *lane.exact_sparse,
+                *replacement_by_name.values(),
+                lane.torch_scatter_links,
+            ):
+                self.assertIn(expected, flat)
+            for leaked in (
+                *deps.EXACT_SPARSE_REQUIREMENTS,
+                deps.TORCH_SCATTER_REQUIREMENT,
+                deps.XFORMERS_REQUIREMENT,
+                deps.LINUX_TRITON_REQUIREMENT,
+                deps.FLASH_ATTN_REQUIREMENT,
+                deps.TORCH_SCATTER_LINKS,
+            ):
+                self.assertNotIn(leaked, flat)
+
     def test_exact_install_has_every_native_stage_and_no_git_command(self) -> None:
         plan = deps.select_dependency_plan(context(sm=86), "exact-upstream")
         commands: list[list[str]] = []
@@ -880,13 +1786,6 @@ class InstallPlanTests(unittest.TestCase):
             commands.append(list(command))
             environments.append(dict(env or {}))
 
-        fake_sources = deps.NativeSources(
-            Path("/cache/native"),
-            Path("/cache/native/nvdiffrast"),
-            Path("/cache/native/CuMesh"),
-            Path("/cache/native/FlexGEMM"),
-            Path("/cache/native/o-voxel"),
-        )
         inherited = {
             "PATH": "/usr/bin:/bin",
             "HTTPS_PROXY": "http://proxy.invalid:8080",
@@ -896,26 +1795,38 @@ class InstallPlanTests(unittest.TestCase):
             "PYTHONPATH": "/tmp/injected",
             "HF_TOKEN": "secret",
         }
-        with mock.patch.dict(deps.os.environ, inherited, clear=True), mock.patch.object(
-            deps, "_assert_target_python"
-        ), mock.patch.object(deps, "_validate_linux_glibc"), mock.patch.object(
-            deps,
-            "native_build_environment",
-            return_value={
-                "PATH": "/usr/bin:/bin",
-                "HTTPS_PROXY": "http://proxy.invalid:8080",
-                "SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt",
-            },
-        ), mock.patch.object(
-            deps, "prepare_native_sources", return_value=fake_sources
-        ), mock.patch.object(
-            deps,
-            "prepare_build_workspace",
-            side_effect=lambda source, _cache, _plan, _purpose: source,
-        ), mock.patch.object(deps, "verify_dependencies", return_value={"ok": True}):
-            deps.install_dependencies(
-                Path(__file__), plan, Path("/cache"), runner=runner, log=lambda _: None
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            python = fake_venv_python(root)
+            cache = root / "cache"
+            native = cache / "native"
+            fake_sources = deps.NativeSources(
+                native,
+                native / "nvdiffrast",
+                native / "CuMesh",
+                native / "FlexGEMM",
+                native / "o-voxel",
             )
+            with mock.patch.dict(deps.os.environ, inherited, clear=True), mock.patch.object(
+                deps, "_assert_target_python"
+            ), mock.patch.object(deps, "_validate_linux_glibc"), mock.patch.object(
+                deps,
+                "native_build_environment",
+                return_value={
+                    "PATH": "/usr/bin:/bin",
+                    "HTTPS_PROXY": "http://proxy.invalid:8080",
+                    "SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt",
+                },
+            ), mock.patch.object(
+                deps, "prepare_native_sources", return_value=fake_sources
+            ), mock.patch.object(
+                deps,
+                "prepare_build_workspace",
+                side_effect=lambda source, _cache, _plan, _purpose: source,
+            ), mock.patch.object(deps, "verify_dependencies", return_value={"ok": True}):
+                deps.install_dependencies(
+                    python, plan, cache, runner=runner, log=lambda _: None
+                )
         flat = "\n".join(" ".join(command) for command in commands)
         for required in (
             "spconv-cu124==2.3.8",
@@ -923,10 +1834,10 @@ class InstallPlanTests(unittest.TestCase):
             "xformers==0.0.29.post2",
             "flash-attn==2.7.4.post1",
             "filelock==3.20.0",
-            "/cache/native/nvdiffrast",
-            "/cache/native/CuMesh",
-            "/cache/native/FlexGEMM",
-            "/cache/native/o-voxel",
+            str(fake_sources.nvdiffrast),
+            str(fake_sources.cumesh),
+            str(fake_sources.flexgemm),
+            str(fake_sources.ovoxel),
         ):
             self.assertIn(required, flat)
         self.assertNotIn("git+", flat)
@@ -937,10 +1848,10 @@ class InstallPlanTests(unittest.TestCase):
             local_source_build = any(
                 source in command
                 for source in (
-                    "/cache/native/nvdiffrast",
-                    "/cache/native/CuMesh",
-                    "/cache/native/FlexGEMM",
-                    "/cache/native/o-voxel",
+                    str(fake_sources.nvdiffrast),
+                    str(fake_sources.cumesh),
+                    str(fake_sources.flexgemm),
+                    str(fake_sources.ovoxel),
                 )
             )
             if "install" in command:
@@ -1031,13 +1942,19 @@ class InstallPlanTests(unittest.TestCase):
                 return result
             return completed
 
-        with mock.patch.object(
-            deps, "cpu_build_environment", return_value={"PATH": ""}
-        ), mock.patch.object(deps.subprocess, "run", side_effect=fake_run):
-            result = deps.verify_portable_cpu_extension(
-                Path("/venv/python"), plan, Path("/cache")
-            )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            python = fake_venv_python(root, symlink=True)
+            base_python = python.resolve(strict=True)
+            with mock.patch.object(
+                deps, "cpu_build_environment", return_value={"PATH": ""}
+            ), mock.patch.object(deps.subprocess, "run", side_effect=fake_run):
+                result = deps.verify_portable_cpu_extension(
+                    python, plan, root / "cache"
+                )
         self.assertEqual(result["voxelCount"], 12)
+        self.assertEqual([command[0] for command in calls], [str(python), str(python)])
+        self.assertNotIn(str(base_python), [command[0] for command in calls])
         smoke_script = calls[1][-1]
         self.assertIn("mesh_to_flexible_dual_grid_cpu", smoke_script)
         self.assertIn("torch.isfinite", smoke_script)
@@ -1069,11 +1986,18 @@ class InstallPlanTests(unittest.TestCase):
                 "attention": "flash_attn",
             }
         )
-        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
-            deps.subprocess, "run", return_value=completed
-        ) as run:
-            deps.verify_dependencies(Path("/venv/python"), plan, Path(temporary))
-        smoke_script = run.call_args.args[0][-1]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            python = fake_venv_python(root, symlink=True)
+            base_python = python.resolve(strict=True)
+            with mock.patch.object(
+                deps.subprocess, "run", return_value=completed
+            ) as run:
+                deps.verify_dependencies(python, plan, root / "cache")
+        smoke_command = run.call_args.args[0]
+        self.assertEqual(smoke_command[0], str(python))
+        self.assertNotEqual(smoke_command[0], str(base_python))
+        smoke_script = smoke_command[-1]
         for token in (
             "import filelock",
             "spconv.SubMConv3d",

@@ -13,8 +13,12 @@ GitHub also works on Windows machines without Git.
 
 from __future__ import annotations
 
+import base64
+import csv
+import ctypes
 from dataclasses import asdict, dataclass
 import hashlib
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -22,8 +26,10 @@ import platform
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
+import sysconfig
 import tempfile
 from typing import Callable, Mapping, Sequence
 from urllib.parse import urlsplit
@@ -51,7 +57,7 @@ from .integrity import (
 LogFunction = Callable[[str], None]
 CommandRunner = Callable[[Sequence[str], Mapping[str, str] | None], None]
 
-DEPENDENCY_SCHEMA = "modly.lato2.dependencies.v1"
+DEPENDENCY_SCHEMA = "modly.lato2.dependencies.v2"
 SOURCE_SCHEMA = "modly.lato2.native-sources.v1"
 STATE_MAX_BYTES = 128 * 1024
 DOWNLOAD_CHUNK = 1024 * 1024
@@ -59,6 +65,15 @@ COMMAND_TIMEOUT_SECONDS = 4 * 60 * 60
 SOURCE_FILE_LIMIT = 25_000
 SOURCE_UNCOMPRESSED_LIMIT = 2 * 1024 * 1024 * 1024
 PYPI_INDEX = "https://pypi.org/simple"
+SUPPORTED_PYTHON_VERSIONS = frozenset({(3, 11), (3, 12)})
+_SUPPORTED_RELEASE_ABIS = {
+    ((3, 11), "linux-x86_64", "x86_64"): "cpython-311-x86_64-linux-gnu",
+    ((3, 12), "linux-x86_64", "x86_64"): "cpython-312-x86_64-linux-gnu",
+    ((3, 11), "linux-aarch64", "aarch64"): "cpython-311-aarch64-linux-gnu",
+    ((3, 12), "linux-aarch64", "aarch64"): "cpython-312-aarch64-linux-gnu",
+    ((3, 11), "win-amd64", "amd64"): "cp311-win_amd64",
+    ((3, 12), "win-amd64", "amd64"): "cp312-win_amd64",
+}
 
 _SENSITIVE_ENV_NAME = re.compile(
     r"TOKEN|SECRET|PASSWORD|PASSWD|AUTH|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL|COOKIE",
@@ -193,8 +208,9 @@ BOOTSTRAP_REQUIREMENTS = (
 
 # Versions shared with the pinned upstream Space where possible.  Direct
 # dependencies omitted by that Space but required by upstream setup.sh are
-# pinned here as well.  The complete CPython 3.11 transitive closure is locked
-# below per OS/architecture/Torch lane and supplied to every pip install.
+# pinned here as well.  CPython 3.11 retains its original closure; CPython
+# 3.12 selects a distinct ABI-keyed lane below.  Both are supplied to every
+# pip install without allowing their caches or native build products to mix.
 BASE_REQUIREMENTS = (
     "numpy==2.2.6",
     "trimesh==4.10.1",
@@ -412,6 +428,103 @@ class DependencyError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class _CusparseLtNormalizationContract:
+    """Exact installed-tree identity for the audited ARM64 wheel correction."""
+
+    schema: str
+    distribution: str
+    version: str
+    dist_info: str
+    package_root: str
+    library_relative: str
+    metadata_relative: str
+    wheel_relative: str
+    record_relative: str
+    package_directories: tuple[str, ...]
+    record_order: tuple[str, ...]
+    fixed_files: tuple[tuple[str, str, int], ...]
+    original_wheel: bytes
+    normalized_wheel: bytes
+    original_record_sha256: str
+    normalized_record_sha256: str
+
+
+_CUSPARSELT_DIST_INFO = "nvidia_cusparselt_cu12-0.7.1.dist-info"
+_CUSPARSELT_PACKAGE_ROOT = "nvidia/cusparselt"
+_CUSPARSELT_ORIGINAL_WHEEL = (
+    b"Wheel-Version: 1.0\n"
+    b"Generator: setuptools (75.8.0)\n"
+    b"Root-Is-Purelib: true\n"
+    b"Tag: py3-none-manylinux2014_sbsa\n\n"
+)
+_CUSPARSELT_NORMALIZED_WHEEL = _CUSPARSELT_ORIGINAL_WHEEL.replace(
+    b"manylinux2014_sbsa", b"manylinux2014_aarch64"
+)
+_CUSPARSELT_NORMALIZATION_CONTRACT = _CusparseLtNormalizationContract(
+    schema="modly.lato2.cusparselt-installed-metadata.v1",
+    distribution="nvidia-cusparselt-cu12",
+    version="0.7.1",
+    dist_info=_CUSPARSELT_DIST_INFO,
+    package_root=_CUSPARSELT_PACKAGE_ROOT,
+    library_relative=f"{_CUSPARSELT_PACKAGE_ROOT}/lib/libcusparseLt.so.0",
+    metadata_relative=f"{_CUSPARSELT_DIST_INFO}/METADATA",
+    wheel_relative=f"{_CUSPARSELT_DIST_INFO}/WHEEL",
+    record_relative=f"{_CUSPARSELT_DIST_INFO}/RECORD",
+    package_directories=("include", "lib"),
+    record_order=(
+        f"{_CUSPARSELT_PACKAGE_ROOT}/LICENSE.txt",
+        f"{_CUSPARSELT_PACKAGE_ROOT}/include/cusparseLt.h",
+        f"{_CUSPARSELT_PACKAGE_ROOT}/lib/libcusparseLt.so.0",
+        f"{_CUSPARSELT_DIST_INFO}/INSTALLER",
+        f"{_CUSPARSELT_DIST_INFO}/METADATA",
+        f"{_CUSPARSELT_DIST_INFO}/RECORD",
+        f"{_CUSPARSELT_DIST_INFO}/WHEEL",
+        f"{_CUSPARSELT_DIST_INFO}/top_level.txt",
+    ),
+    fixed_files=(
+        (
+            f"{_CUSPARSELT_PACKAGE_ROOT}/LICENSE.txt",
+            "e8d158885a681b95ec7a6fc06dd8d4a52989f374cb1380c8a4c8fb27fd3d5d5e",
+            17948,
+        ),
+        (
+            f"{_CUSPARSELT_PACKAGE_ROOT}/include/cusparseLt.h",
+            "74580d3104ed58e1708d2ee746f65c2a9e1557f91b1d158d2d93c1591e118c38",
+            17876,
+        ),
+        (
+            f"{_CUSPARSELT_PACKAGE_ROOT}/lib/libcusparseLt.so.0",
+            "2c677e678d1955a6dedd66274dfe4cc0f930fea6421f1b8a5ec08cbb1ea18b17",
+            440496193,
+        ),
+        (
+            f"{_CUSPARSELT_DIST_INFO}/INSTALLER",
+            "ceebae7b8927a3227e5303cf5e0f1f7b34bb542ad7250ac03fbcde36ec2f1508",
+            4,
+        ),
+        (
+            f"{_CUSPARSELT_DIST_INFO}/METADATA",
+            "b264cea6951b70b52a3fd2ffaa88f9109eaf379633aa8d6e0832ecc92ddf6fba",
+            6974,
+        ),
+        (
+            f"{_CUSPARSELT_DIST_INFO}/top_level.txt",
+            "a1f202f9d6cad2cdb68cde79b207d5a5b847593eb765d24b59e49be8aff5f812",
+            18,
+        ),
+    ),
+    original_wheel=_CUSPARSELT_ORIGINAL_WHEEL,
+    normalized_wheel=_CUSPARSELT_NORMALIZED_WHEEL,
+    original_record_sha256=(
+        "e02265be65d5f1aab74b97ffd2d53ca2ccf9d41ba0ca9cddf8d9b4bd34262425"
+    ),
+    normalized_record_sha256=(
+        "54b7063009a7cb86f1a0b2dd0bc0af777f8946440084365671e1745a1d61a976"
+    ),
+)
+
+
+@dataclass(frozen=True)
 class SourceArchive:
     name: str
     url: str
@@ -479,6 +592,501 @@ SOURCE_ARCHIVES = (
 )
 
 
+# CPython 3.12 is frozen independently from the original cp311 constants.
+# Keep these as explicit tuple constructions rather than aliases: coincident
+# pins may diverge without mutating or silently widening the upstream lane.
+CP312_BOOTSTRAP_REQUIREMENTS = tuple(
+    [
+        "pip==25.1.1",
+        "setuptools==80.9.0",
+        "wheel==0.45.1",
+        "packaging==25.0",
+    ]
+)
+CP312_BASE_REQUIREMENTS = tuple(
+    [
+        "numpy==2.2.6",
+        "trimesh==4.10.1",
+        "tqdm==4.67.1",
+        "pillow==12.0.0",
+        "ninja==1.13.0",
+        "psutil==7.1.3",
+        "opencv-python-headless==4.12.0.88",
+        "huggingface-hub==0.36.0",
+        "plyfile==1.1",
+        "zstandard==0.25.0",
+        "easydict==1.13",
+        "einops==0.8.1",
+        "filelock==3.20.0",
+    ]
+)
+CP312_COMMON_TRANSITIVE_REQUIREMENTS = tuple(
+    [
+        "certifi==2026.7.22",
+        "charset-normalizer==3.5.1",
+        "fsspec==2026.7.0",
+        "hf-xet==1.6.0",
+        "idna==3.19",
+        "jinja2==3.1.6",
+        "markupsafe==3.0.3",
+        "mpmath==1.3.0",
+        "networkx==3.6.1",
+        "pyyaml==6.0.3",
+        "requests==2.34.2",
+        "typing-extensions==4.16.0",
+        "urllib3==2.7.0",
+    ]
+)
+CP312_X64_RENDER_REQUIREMENTS = tuple(["open3d==0.19.0"])
+CP312_X64_RENDER_COMMON_TRANSITIVE_REQUIREMENTS = tuple(
+    [
+        "annotated-types==0.8.0",
+        "asttokens==3.0.2",
+        "attrs==26.1.0",
+        "blinker==1.9.0",
+        "click==8.5.0",
+        "comm==0.2.3",
+        "configargparse==1.7.5",
+        "dash==4.4.1",
+        "executing==2.2.1",
+        "fastjsonschema==2.22.2",
+        "flask==3.1.3",
+        "importlib-metadata==9.0.1",
+        "ipython-pygments-lexers==1.1.1",
+        "ipython==9.17.0",
+        "ipywidgets==8.1.9",
+        "itsdangerous==2.2.0",
+        "janus==2.0.0",
+        "jedi==0.20.0",
+        "jsonschema-specifications==2025.9.1",
+        "jsonschema==4.26.0",
+        "jupyter-core==5.9.1",
+        "jupyterlab-widgets==3.0.17",
+        "matplotlib-inline==0.2.2",
+        "narwhals==2.25.0",
+        "nbformat==5.11.1",
+        "nest-asyncio==1.6.0",
+        "parso==0.8.7",
+        "platformdirs==4.11.5",
+        "plotly==7.0.0",
+        "prompt-toolkit==3.0.53",
+        "pure-eval==0.2.3",
+        "pydantic-core==2.46.5",
+        "pydantic==2.13.5",
+        "pygments==2.21.0",
+        "referencing==0.37.0",
+        "retrying==1.4.2",
+        "rpds-py==2026.6.3",
+        "stack-data==0.6.3",
+        "traitlets==5.16.1",
+        "typing-inspection==0.4.4",
+        "wcwidth==0.8.3",
+        "werkzeug==3.1.8",
+        "widgetsnbextension==4.0.16",
+        "zipp==4.1.0",
+    ]
+)
+CP312_LINUX_X64_RENDER_TRANSITIVE_REQUIREMENTS = tuple(
+    [
+        "addict==2.4.0",
+        "contourpy==1.3.3",
+        "cycler==0.12.1",
+        "fonttools==4.63.0",
+        "joblib==1.5.3",
+        "kiwisolver==1.5.1",
+        "matplotlib==3.11.1",
+        "pandas==3.0.5",
+        "pexpect==4.9.0",
+        "ptyprocess==0.7.0",
+        "pyparsing==3.3.2",
+        "pyquaternion==0.9.9",
+        "python-dateutil==2.9.0.post0",
+        "scikit-learn==1.9.0",
+        "scipy==1.17.1",
+        "six==1.17.0",
+        "threadpoolctl==3.6.0",
+    ]
+)
+CP312_WINDOWS_X64_RENDER_TRANSITIVE_REQUIREMENTS = tuple(["colorama==0.4.6"])
+CP312_TORCH_LANES = tuple(
+    [
+        ("cu124", ("torch==2.6.0+cu124", "torchvision==0.21.0+cu124")),
+        ("cu126", ("torch==2.6.0+cu126", "torchvision==0.21.0+cu126")),
+        ("cu128", ("torch==2.9.1+cu128", "torchvision==0.24.1+cu128")),
+    ]
+)
+CP312_TORCH_INDEXES = tuple(
+    [
+        ("cu124", "https://download.pytorch.org/whl/cu124"),
+        ("cu126", "https://download.pytorch.org/whl/cu126"),
+        ("cu128", "https://download.pytorch.org/whl/cu128"),
+    ]
+)
+CP312_TORCH_COMMON_TRANSITIVE_REQUIREMENTS = tuple(
+    [
+        ("cu124", tuple(["sympy==1.13.1"])),
+        ("cu126", tuple(["sympy==1.13.1"])),
+        ("cu128", tuple(["sympy==1.14.0"])),
+    ]
+)
+CP312_TORCH_CU124_LINUX_X64_TRANSITIVE_REQUIREMENTS = tuple(
+    [
+        "nvidia-cublas-cu12==12.4.5.8",
+        "nvidia-cuda-cupti-cu12==12.4.127",
+        "nvidia-cuda-nvrtc-cu12==12.4.127",
+        "nvidia-cuda-runtime-cu12==12.4.127",
+        "nvidia-cudnn-cu12==9.1.0.70",
+        "nvidia-cufft-cu12==11.2.1.3",
+        "nvidia-curand-cu12==10.3.5.147",
+        "nvidia-cusolver-cu12==11.6.1.9",
+        "nvidia-cusparse-cu12==12.3.1.170",
+        "nvidia-cusparselt-cu12==0.6.2",
+        "nvidia-nccl-cu12==2.21.5",
+        "nvidia-nvjitlink-cu12==12.4.127",
+        "nvidia-nvtx-cu12==12.4.127",
+        "triton==3.2.0",
+    ]
+)
+CP312_TORCH_CU128_LINUX_TRANSITIVE_REQUIREMENTS = tuple(
+    [
+        "nvidia-cublas-cu12==12.8.4.1",
+        "nvidia-cuda-cupti-cu12==12.8.90",
+        "nvidia-cuda-nvrtc-cu12==12.8.93",
+        "nvidia-cuda-runtime-cu12==12.8.90",
+        "nvidia-cudnn-cu12==9.10.2.21",
+        "nvidia-cufft-cu12==11.3.3.83",
+        "nvidia-cufile-cu12==1.13.1.3",
+        "nvidia-curand-cu12==10.3.9.90",
+        "nvidia-cusolver-cu12==11.7.3.90",
+        "nvidia-cusparse-cu12==12.5.8.93",
+        "nvidia-cusparselt-cu12==0.7.1",
+        "nvidia-nccl-cu12==2.27.5",
+        "nvidia-nvjitlink-cu12==12.8.93",
+        "nvidia-nvshmem-cu12==3.3.20",
+        "nvidia-nvtx-cu12==12.8.90",
+        "triton==3.5.1",
+    ]
+)
+CP312_EXACT_SPARSE_REQUIREMENTS = tuple(
+    ["cumm-cu124==0.7.11", "spconv-cu124==2.3.8"]
+)
+CP312_TORCH_SCATTER_LINKS = "https://data.pyg.org/whl/torch-2.6.0+cu124.html"
+CP312_EXACT_NATIVE_REQUIREMENTS = tuple(
+    [
+        ("always", "torch-scatter==2.1.2+pt26cu124"),
+        ("always", "xformers==0.0.29.post2"),
+        ("linux", "triton==3.2.0"),
+        ("win32", "triton-windows==3.2.0.post21"),
+        ("flash", "flash-attn==2.7.4.post1"),
+        ("always", "nvdiffrast==0.4.0"),
+        ("always", "cumesh==0.0.1"),
+        ("always", "flex-gemm==1.0.0"),
+        ("always", "o-voxel==0.0.1"),
+        ("always", "ccimport==0.4.4"),
+        ("always", "fire==0.7.1"),
+        ("always", "lark==1.3.1"),
+        ("always", "pccm==0.4.16"),
+        ("always", "portalocker==4.3.0"),
+        ("always", "pybind11==3.1.0"),
+        ("always", "termcolor==3.3.0"),
+    ]
+)
+
+
+@dataclass(frozen=True)
+class PythonABI:
+    """Interpreter identity that partitions every native dependency lock."""
+
+    implementation: str
+    version: tuple[int, int]
+    cache_tag: str
+    abiflags: str
+    soabi: str
+    platform: str
+    machine: str
+    pointer_bits: int
+
+    @property
+    def lane(self) -> str:
+        return f"cp{self.version[0]}{self.version[1]}"
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "lane": self.lane,
+            "implementation": self.implementation,
+            "version": list(self.version),
+            "cacheTag": self.cache_tag,
+            "abiflags": self.abiflags,
+            "soabi": self.soabi,
+            "platform": self.platform,
+            "machine": self.machine,
+            "pointerBits": self.pointer_bits,
+        }
+
+
+def _current_python_fingerprint() -> dict[str, object]:
+    return {
+        "implementation": sys.implementation.name,
+        "version": list(sys.version_info[:2]),
+        "cache_tag": sys.implementation.cache_tag,
+        "abiflags": getattr(sys, "abiflags", ""),
+        "soabi": sysconfig.get_config_var("SOABI"),
+        "platform": sysconfig.get_platform().lower(),
+        "machine": platform.machine().lower(),
+        "pointer_bits": struct.calcsize("P") * 8,
+    }
+
+
+def python_abi_from_fingerprint(
+    fingerprint: Mapping[str, object],
+) -> PythonABI:
+    """Validate and normalize one supported 64-bit CPython ABI fingerprint."""
+
+    raw_version = fingerprint.get("version")
+    if (
+        not isinstance(raw_version, (list, tuple))
+        or len(raw_version) != 2
+        or any(isinstance(part, bool) or not isinstance(part, int) for part in raw_version)
+    ):
+        raise DependencyError(
+            "PYTHON_ABI_UNSUPPORTED",
+            "this release supports only 64-bit CPython 3.11 and 3.12",
+        )
+    version = (raw_version[0], raw_version[1])
+    implementation = str(fingerprint.get("implementation") or "").casefold()
+    cache_tag = str(fingerprint.get("cache_tag") or "")
+    abiflags = str(fingerprint.get("abiflags") or "")
+    soabi = str(fingerprint.get("soabi") or "")
+    platform_tag = str(fingerprint.get("platform") or "").strip().casefold()
+    machine = str(fingerprint.get("machine") or "").strip().casefold()
+    pointer_bits = fingerprint.get("pointer_bits")
+    expected_tag = f"cpython-{version[0]}{version[1]}"
+    expected_soabi = _SUPPORTED_RELEASE_ABIS.get((version, platform_tag, machine))
+    if (
+        implementation != "cpython"
+        or version not in SUPPORTED_PYTHON_VERSIONS
+        or pointer_bits != 64
+        or cache_tag != expected_tag
+        or abiflags != ""
+        or soabi != expected_soabi
+    ):
+        raise DependencyError(
+            "PYTHON_ABI_UNSUPPORTED",
+            "this release supports only 64-bit CPython 3.11 and 3.12",
+        )
+    return PythonABI(
+        implementation=implementation,
+        version=version,
+        cache_tag=cache_tag,
+        abiflags=abiflags,
+        soabi=soabi,
+        platform=platform_tag,
+        machine=machine,
+        pointer_bits=pointer_bits,
+    )
+
+
+@dataclass(frozen=True)
+class PythonRequirementLane:
+    """One explicit version-locked closure selected by a Python ABI."""
+
+    name: str
+    version: tuple[int, int]
+    bootstrap: tuple[str, ...]
+    base: tuple[str, ...]
+    common_transitive: tuple[str, ...]
+    x64_render: tuple[str, ...]
+    x64_render_common: tuple[str, ...]
+    linux_x64_render: tuple[str, ...]
+    windows_x64_render: tuple[str, ...]
+    torch_lanes: tuple[tuple[str, tuple[str, str]], ...]
+    torch_indexes: tuple[tuple[str, str], ...]
+    torch_common: tuple[tuple[str, tuple[str, ...]], ...]
+    torch_platform: tuple[
+        tuple[tuple[str, str, str], tuple[str, ...]], ...
+    ]
+    exact_sparse: tuple[str, ...]
+    exact_native: tuple[tuple[str, str], ...]
+    torch_scatter_links: str
+
+    def torch_requirements_for(self, torch_lane: str, arch: str) -> tuple[str, str]:
+        try:
+            torch_requirement, vision_requirement = dict(self.torch_lanes)[torch_lane]
+        except KeyError as exc:
+            raise DependencyError(
+                "DEPENDENCY_PLAN_UNSUPPORTED",
+                "the selected Python/Torch lane has no audited dependency closure",
+            ) from exc
+        if arch == "arm64":
+            vision_requirement = vision_requirement.split("+", 1)[0]
+        return torch_requirement, vision_requirement
+
+    def torch_index_for(self, torch_lane: str) -> str:
+        try:
+            return dict(self.torch_indexes)[torch_lane]
+        except KeyError as exc:
+            raise DependencyError(
+                "DEPENDENCY_PLAN_UNSUPPORTED",
+                "the selected Python/Torch lane has no audited package index",
+            ) from exc
+
+    def torch_common_for(self, torch_lane: str) -> tuple[str, ...]:
+        try:
+            return dict(self.torch_common)[torch_lane]
+        except KeyError as exc:
+            raise DependencyError(
+                "DEPENDENCY_PLAN_UNSUPPORTED",
+                "the selected Python/Torch lane has no audited dependency closure",
+            ) from exc
+
+    def torch_platform_for(
+        self, torch_lane: str, system: str, arch: str
+    ) -> tuple[str, ...]:
+        try:
+            return dict(self.torch_platform)[(torch_lane, system, arch)]
+        except KeyError as exc:
+            raise DependencyError(
+                "DEPENDENCY_PLAN_UNSUPPORTED",
+                "the selected Python/OS/architecture/Torch lane has no audited dependency closure",
+            ) from exc
+
+    def exact_native_for(self, system: str, install_flash_attn: bool) -> tuple[str, ...]:
+        selected = []
+        for scope, requirement in self.exact_native:
+            if scope == "always" or scope == system or (
+                scope == "flash" and install_flash_attn
+            ):
+                selected.append(requirement)
+        return tuple(selected)
+
+    def exact_requirement_for(
+        self, name: str, system: str, install_flash_attn: bool
+    ) -> str:
+        matches = tuple(
+            requirement
+            for requirement in self.exact_native_for(system, install_flash_attn)
+            if _requirement_name(requirement) == name
+        )
+        if len(matches) != 1:
+            raise DependencyError(
+                "DEPENDENCY_PLAN_INVALID",
+                f"the selected Python lane must lock exactly one {name} requirement",
+            )
+        return matches[0]
+
+
+# CPython 3.11 remains the upstream Modly lane.  CPython 3.12 is an explicit
+# second lane rather than an expansion of cp311; keeping separate records and
+# lock identities lets either closure diverge safely when package metadata does.
+PYTHON_REQUIREMENT_LANES = {
+    "cp311": PythonRequirementLane(
+        name="cp311",
+        version=(3, 11),
+        bootstrap=BOOTSTRAP_REQUIREMENTS,
+        base=BASE_REQUIREMENTS,
+        common_transitive=COMMON_TRANSITIVE_REQUIREMENTS,
+        x64_render=X64_RENDER_REQUIREMENTS,
+        x64_render_common=X64_RENDER_COMMON_TRANSITIVE_REQUIREMENTS,
+        linux_x64_render=LINUX_X64_RENDER_TRANSITIVE_REQUIREMENTS,
+        windows_x64_render=WINDOWS_X64_RENDER_TRANSITIVE_REQUIREMENTS,
+        torch_lanes=tuple(TORCH_LANES.items()),
+        torch_indexes=tuple(PYTORCH_INDEXES.items()),
+        torch_common=tuple(
+            (name, requirements)
+            for name, requirements in TORCH_LANE_COMMON_TRANSITIVE_REQUIREMENTS.items()
+        ),
+        torch_platform=tuple(
+            [
+                (
+                    ("cu124", "linux", "x64"),
+                    TORCH_CU124_LINUX_X64_TRANSITIVE_REQUIREMENTS,
+                ),
+                (("cu124", "win32", "x64"), ()),
+                (("cu126", "linux", "arm64"), ()),
+                (
+                    ("cu128", "linux", "x64"),
+                    TORCH_CU128_LINUX_TRANSITIVE_REQUIREMENTS,
+                ),
+                (
+                    ("cu128", "linux", "arm64"),
+                    TORCH_CU128_LINUX_TRANSITIVE_REQUIREMENTS,
+                ),
+                (("cu128", "win32", "x64"), ()),
+            ]
+        ),
+        exact_sparse=EXACT_SPARSE_REQUIREMENTS,
+        exact_native=tuple(
+            [
+                ("always", TORCH_SCATTER_REQUIREMENT),
+                ("always", XFORMERS_REQUIREMENT),
+                ("linux", LINUX_TRITON_REQUIREMENT),
+                ("win32", WINDOWS_TRITON_REQUIREMENT),
+                ("flash", FLASH_ATTN_REQUIREMENT),
+                *[("always", item) for item in NATIVE_SOURCE_DISTRIBUTION_REQUIREMENTS],
+                *[("always", item) for item in EXACT_TRANSITIVE_REQUIREMENTS],
+            ]
+        ),
+        torch_scatter_links=TORCH_SCATTER_LINKS,
+    ),
+    "cp312": PythonRequirementLane(
+        name="cp312",
+        version=(3, 12),
+        bootstrap=CP312_BOOTSTRAP_REQUIREMENTS,
+        base=CP312_BASE_REQUIREMENTS,
+        common_transitive=CP312_COMMON_TRANSITIVE_REQUIREMENTS,
+        x64_render=CP312_X64_RENDER_REQUIREMENTS,
+        x64_render_common=CP312_X64_RENDER_COMMON_TRANSITIVE_REQUIREMENTS,
+        linux_x64_render=CP312_LINUX_X64_RENDER_TRANSITIVE_REQUIREMENTS,
+        windows_x64_render=CP312_WINDOWS_X64_RENDER_TRANSITIVE_REQUIREMENTS,
+        torch_lanes=CP312_TORCH_LANES,
+        torch_indexes=CP312_TORCH_INDEXES,
+        torch_common=CP312_TORCH_COMMON_TRANSITIVE_REQUIREMENTS,
+        torch_platform=tuple(
+            [
+                (
+                    ("cu124", "linux", "x64"),
+                    CP312_TORCH_CU124_LINUX_X64_TRANSITIVE_REQUIREMENTS,
+                ),
+                (("cu124", "win32", "x64"), tuple([])),
+                (("cu126", "linux", "arm64"), tuple([])),
+                (
+                    ("cu128", "linux", "x64"),
+                    CP312_TORCH_CU128_LINUX_TRANSITIVE_REQUIREMENTS,
+                ),
+                (
+                    ("cu128", "linux", "arm64"),
+                    CP312_TORCH_CU128_LINUX_TRANSITIVE_REQUIREMENTS,
+                ),
+                (("cu128", "win32", "x64"), tuple([])),
+            ]
+        ),
+        exact_sparse=CP312_EXACT_SPARSE_REQUIREMENTS,
+        exact_native=CP312_EXACT_NATIVE_REQUIREMENTS,
+        torch_scatter_links=CP312_TORCH_SCATTER_LINKS,
+    ),
+}
+
+
+def _python_requirement_lane_for_abi(python_abi: PythonABI) -> PythonRequirementLane:
+    try:
+        lane = PYTHON_REQUIREMENT_LANES[python_abi.lane]
+    except KeyError as exc:
+        raise DependencyError(
+            "DEPENDENCY_PLAN_UNSUPPORTED",
+            "the selected Python ABI has no audited dependency closure",
+        ) from exc
+    if lane.version != python_abi.version:
+        raise DependencyError(
+            "DEPENDENCY_PLAN_INVALID",
+            "the selected Python ABI does not match its dependency lane",
+        )
+    return lane
+
+
+def _python_requirement_lane(plan: "DependencyPlan") -> PythonRequirementLane:
+    return _python_requirement_lane_for_abi(plan.python_abi)
+
+
 @dataclass(frozen=True)
 class DependencyPlan:
     profile: str
@@ -493,10 +1101,13 @@ class DependencyPlan:
     install_native_stack: bool
     support_level: str
     note: str
+    python_abi: PythonABI
 
     def payload(self) -> dict[str, object]:
         payload = asdict(self)
         payload["torch_requirements"] = list(self.torch_requirements)
+        payload.pop("python_abi")
+        payload["python"] = self.python_abi.payload()
         return payload
 
 
@@ -608,6 +1219,1099 @@ def sanitize_subprocess_environment(
     return sanitized
 
 
+def _validated_venv_python_path(python: Path) -> Path:
+    """Return a canonical venv container path without resolving its Python link."""
+
+    raw = Path(python).expanduser()
+    if not raw.is_absolute():
+        raise DependencyError(
+            "PYTHON_PATH_INVALID",
+            "the extension virtualenv Python path must be absolute",
+        )
+    scripts_name = raw.parent.name
+    executable_name = raw.name
+    valid_layout = (
+        scripts_name == "bin" and executable_name == "python"
+    ) or (
+        scripts_name.casefold() == "scripts"
+        and executable_name.casefold() == "python.exe"
+    )
+    if not valid_layout:
+        raise DependencyError(
+            "PYTHON_PATH_INVALID",
+            "the Python executable is outside a supported virtualenv layout",
+        )
+
+    venv_root = raw.parent.parent
+    try:
+        root_info = venv_root.lstat()
+        scripts_info = raw.parent.lstat()
+        if (
+            stat.S_ISLNK(root_info.st_mode)
+            or getattr(root_info, "st_file_attributes", 0) & 0x400
+            or not stat.S_ISDIR(root_info.st_mode)
+            or stat.S_ISLNK(scripts_info.st_mode)
+            or getattr(scripts_info, "st_file_attributes", 0) & 0x400
+            or not stat.S_ISDIR(scripts_info.st_mode)
+        ):
+            raise OSError("virtualenv container is aliased or not a directory")
+        canonical_root = venv_root.resolve(strict=True)
+        canonical_scripts = raw.parent.resolve(strict=True)
+        if canonical_scripts.parent != canonical_root:
+            raise OSError("virtualenv scripts directory escaped its container")
+
+        config = canonical_root / "pyvenv.cfg"
+        config_info = config.lstat()
+        if (
+            stat.S_ISLNK(config_info.st_mode)
+            or getattr(config_info, "st_file_attributes", 0) & 0x400
+            or not stat.S_ISREG(config_info.st_mode)
+        ):
+            raise OSError("virtualenv configuration is not a regular file")
+
+        logical_python = canonical_scripts / executable_name
+        python_info = logical_python.lstat()
+        python_is_link = stat.S_ISLNK(python_info.st_mode)
+        if (
+            getattr(python_info, "st_file_attributes", 0) & 0x400
+            or (not python_is_link and not stat.S_ISREG(python_info.st_mode))
+            or not logical_python.is_file()
+        ):
+            raise OSError("virtualenv Python is unavailable")
+    except OSError as exc:
+        raise DependencyError(
+            "PYTHON_PATH_INVALID",
+            "the extension virtualenv Python path is unsafe or incomplete",
+        ) from exc
+    # Linux venvs intentionally use bin/python -> the base interpreter.  Keep
+    # that final logical component so CPython discovers the adjacent pyvenv.cfg.
+    return logical_python
+
+
+def _safe_installed_relative(value: str) -> PurePosixPath:
+    relative = PurePosixPath(str(value))
+    if (
+        not str(value)
+        or relative.is_absolute()
+        or ".." in relative.parts
+        or "." in relative.parts
+        or "\\" in str(value)
+        or "\x00" in str(value)
+    ):
+        raise DependencyError(
+            "CUSPARSELT_METADATA_INVALID",
+            "cuSPARSELt installed metadata contains an unsafe path",
+        )
+    return relative
+
+
+def _record_sha256_value(digest_hex: str) -> str:
+    try:
+        digest = bytes.fromhex(digest_hex)
+    except ValueError as exc:
+        raise DependencyError(
+            "CUSPARSELT_CONTRACT_INVALID",
+            "the audited cuSPARSELt file digest is malformed",
+        ) from exc
+    if len(digest) != hashlib.sha256().digest_size:
+        raise DependencyError(
+            "CUSPARSELT_CONTRACT_INVALID",
+            "the audited cuSPARSELt file digest is malformed",
+        )
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def _expected_cusparselt_record(
+    contract: _CusparseLtNormalizationContract, *, normalized: bool
+) -> bytes:
+    fixed = {relative: (digest, size) for relative, digest, size in contract.fixed_files}
+    if len(fixed) != len(contract.fixed_files):
+        raise DependencyError(
+            "CUSPARSELT_CONTRACT_INVALID",
+            "the audited cuSPARSELt file set contains duplicates",
+        )
+    wheel = contract.normalized_wheel if normalized else contract.original_wheel
+    rows: list[str] = []
+    for relative in contract.record_order:
+        _safe_installed_relative(relative)
+        if relative == contract.record_relative:
+            rows.append(f"{relative},,")
+        else:
+            if relative == contract.wheel_relative:
+                digest = hashlib.sha256(wheel).hexdigest()
+                size = len(wheel)
+            else:
+                try:
+                    digest, size = fixed[relative]
+                except KeyError as exc:
+                    raise DependencyError(
+                        "CUSPARSELT_CONTRACT_INVALID",
+                        "the audited cuSPARSELt RECORD file set is incomplete",
+                    ) from exc
+            rows.append(
+                f"{relative},sha256={_record_sha256_value(digest)},{size}"
+            )
+    return ("\r\n".join(rows) + "\r\n").encode("ascii")
+
+
+def _validate_cusparselt_contract(
+    contract: _CusparseLtNormalizationContract,
+) -> tuple[bytes, bytes]:
+    paths = tuple(contract.record_order)
+    fixed_paths = tuple(relative for relative, _digest, _size in contract.fixed_files)
+    expected_paths = set(fixed_paths) | {
+        contract.wheel_relative,
+        contract.record_relative,
+    }
+    for relative in (
+        contract.dist_info,
+        contract.package_root,
+        contract.library_relative,
+        contract.metadata_relative,
+        contract.wheel_relative,
+        contract.record_relative,
+        *paths,
+        *fixed_paths,
+    ):
+        _safe_installed_relative(relative)
+    if (
+        len(paths) != len(set(paths))
+        or set(paths) != expected_paths
+        or contract.record_relative not in paths
+        or contract.wheel_relative not in paths
+        or contract.metadata_relative not in fixed_paths
+        or contract.library_relative not in fixed_paths
+        or contract.original_wheel.count(b"manylinux2014_sbsa") != 1
+        or contract.normalized_wheel
+        != contract.original_wheel.replace(
+            b"manylinux2014_sbsa", b"manylinux2014_aarch64"
+        )
+    ):
+        raise DependencyError(
+            "CUSPARSELT_CONTRACT_INVALID",
+            "the audited cuSPARSELt normalization contract is inconsistent",
+        )
+    original_record = _expected_cusparselt_record(contract, normalized=False)
+    normalized_record = _expected_cusparselt_record(contract, normalized=True)
+    if (
+        hashlib.sha256(original_record).hexdigest()
+        != contract.original_record_sha256
+        or hashlib.sha256(normalized_record).hexdigest()
+        != contract.normalized_record_sha256
+    ):
+        raise DependencyError(
+            "CUSPARSELT_CONTRACT_INVALID",
+            "the audited cuSPARSELt RECORD identities are inconsistent",
+        )
+    return original_record, normalized_record
+
+
+def _require_linux_fd_security() -> None:
+    required_dir_fd = (os.open, os.stat, os.unlink)
+    if (
+        not sys.platform.startswith("linux")
+        or not hasattr(os, "O_DIRECTORY")
+        or not hasattr(os, "O_NOFOLLOW")
+        or any(function not in os.supports_dir_fd for function in required_dir_fd)
+        or os.stat not in os.supports_follow_symlinks
+        or not Path("/proc/self/fd").is_dir()
+    ):
+        raise DependencyError(
+            "CUSPARSELT_FD_SECURITY_UNAVAILABLE",
+            "the audited cuSPARSELt correction requires Linux openat and /proc file-descriptor semantics",
+        )
+
+
+def _stat_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        stat.S_IFMT(info.st_mode),
+        info.st_size,
+        getattr(info, "st_mtime_ns", 0),
+        getattr(info, "st_ctime_ns", 0),
+        getattr(info, "st_nlink", 1),
+    )
+
+
+def _same_inode(first: os.stat_result, second: os.stat_result) -> bool:
+    return (
+        first.st_dev == second.st_dev
+        and first.st_ino == second.st_ino
+        and stat.S_IFMT(first.st_mode) == stat.S_IFMT(second.st_mode)
+    )
+
+
+def _validate_directory_info(info: os.stat_result) -> None:
+    if not stat.S_ISDIR(info.st_mode):
+        raise OSError("entry is not a directory")
+
+
+def _validate_regular_info(info: os.stat_result) -> None:
+    if not stat.S_ISREG(info.st_mode) or getattr(info, "st_nlink", 1) != 1:
+        raise OSError("entry is not an owned single-link regular file")
+
+
+def _directory_flags() -> int:
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def _file_flags() -> int:
+    return os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def _open_directory_path(path: Path) -> int:
+    descriptor: int | None = None
+    try:
+        before = path.lstat()
+        _validate_directory_info(before)
+        descriptor = os.open(path, _directory_flags())
+        opened = os.fstat(descriptor)
+        after = path.lstat()
+        _validate_directory_info(opened)
+        if not _same_inode(before, opened) or not _same_inode(opened, after):
+            raise OSError("directory changed while opened")
+        return descriptor
+    except OSError:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+
+
+def _safe_leaf_name(name: str) -> str:
+    if not name or name in {".", ".."} or "/" in name or "\\" in name or "\x00" in name:
+        raise OSError("unsafe directory entry name")
+    return name
+
+
+def _open_directory_at(parent_descriptor: int, name: str) -> int:
+    descriptor: int | None = None
+    name = _safe_leaf_name(name)
+    try:
+        before = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        _validate_directory_info(before)
+        descriptor = os.open(
+            name, _directory_flags(), dir_fd=parent_descriptor
+        )
+        opened = os.fstat(descriptor)
+        after = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        _validate_directory_info(opened)
+        if not _same_inode(before, opened) or not _same_inode(opened, after):
+            raise OSError("directory changed while opened")
+        return descriptor
+    except OSError:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+
+
+def _open_regular_at(parent_descriptor: int, name: str) -> int:
+    descriptor: int | None = None
+    name = _safe_leaf_name(name)
+    try:
+        before = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        _validate_regular_info(before)
+        descriptor = os.open(name, _file_flags(), dir_fd=parent_descriptor)
+        opened = os.fstat(descriptor)
+        after = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        _validate_regular_info(opened)
+        if (
+            _stat_identity(before) != _stat_identity(opened)
+            or _stat_identity(opened) != _stat_identity(after)
+        ):
+            raise OSError("file changed while opened")
+        return descriptor
+    except OSError:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+
+
+def _verify_directory_binding(
+    parent_descriptor: int, name: str, descriptor: int
+) -> None:
+    linked = os.stat(
+        _safe_leaf_name(name),
+        dir_fd=parent_descriptor,
+        follow_symlinks=False,
+    )
+    opened = os.fstat(descriptor)
+    _validate_directory_info(linked)
+    _validate_directory_info(opened)
+    if not _same_inode(linked, opened):
+        raise OSError("directory binding changed")
+
+
+@dataclass(frozen=True)
+class _OpenFileSnapshot:
+    relative: str
+    name: str
+    parent_descriptor: int
+    descriptor: int
+    identity: tuple[int, ...]
+    digest: str
+    size: int
+    prefix: bytes
+    data: bytes | None
+
+
+def _snapshot_open_file(
+    descriptor: int,
+    parent_descriptor: int,
+    name: str,
+    relative: str,
+    *,
+    capture_limit: int | None,
+) -> _OpenFileSnapshot:
+    before = os.fstat(descriptor)
+    _validate_regular_info(before)
+    if capture_limit is not None and before.st_size > capture_limit:
+        raise OSError("captured metadata file exceeds its safety limit")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    prefix = bytearray()
+    captured = bytearray() if capture_limit is not None else None
+    total = 0
+    while True:
+        block = os.read(descriptor, DOWNLOAD_CHUNK)
+        if not block:
+            break
+        total += len(block)
+        digest.update(block)
+        if len(prefix) < 20:
+            prefix.extend(block[: 20 - len(prefix)])
+        if captured is not None:
+            captured.extend(block)
+            if len(captured) > capture_limit:
+                raise OSError("captured metadata file exceeds its safety limit")
+    after = os.fstat(descriptor)
+    _validate_regular_info(after)
+    if _stat_identity(before) != _stat_identity(after) or total != before.st_size:
+        raise OSError("file changed while hashed")
+    return _OpenFileSnapshot(
+        relative=relative,
+        name=name,
+        parent_descriptor=parent_descriptor,
+        descriptor=descriptor,
+        identity=_stat_identity(before),
+        digest=digest.hexdigest(),
+        size=before.st_size,
+        prefix=bytes(prefix),
+        data=bytes(captured) if captured is not None else None,
+    )
+
+
+def _verify_file_snapshot(snapshot: _OpenFileSnapshot) -> None:
+    linked = os.stat(
+        snapshot.name,
+        dir_fd=snapshot.parent_descriptor,
+        follow_symlinks=False,
+    )
+    opened = os.fstat(snapshot.descriptor)
+    _validate_regular_info(linked)
+    _validate_regular_info(opened)
+    if (
+        _stat_identity(linked) != snapshot.identity
+        or _stat_identity(opened) != snapshot.identity
+    ):
+        raise OSError("file binding changed after hashing")
+
+
+@dataclass
+class _FdInventory:
+    files: dict[str, _OpenFileSnapshot]
+    directories: tuple[str, ...]
+    directory_bindings: tuple[tuple[int, str, int], ...]
+    descriptors: tuple[int, ...]
+
+    def revalidate(self) -> None:
+        for parent_descriptor, name, descriptor in self.directory_bindings:
+            _verify_directory_binding(parent_descriptor, name, descriptor)
+        for snapshot in self.files.values():
+            _verify_file_snapshot(snapshot)
+
+    def close(self) -> None:
+        for descriptor in reversed(self.descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _inventory_open_tree(
+    root_descriptor: int,
+    root_relative: str,
+    *,
+    capture_limits: Mapping[str, int],
+) -> _FdInventory:
+    files: dict[str, _OpenFileSnapshot] = {}
+    directories: set[str] = set()
+    bindings: list[tuple[int, str, int]] = []
+    descriptors: list[int] = []
+
+    def walk(descriptor: int, relative_root: str) -> None:
+        names = os.listdir(descriptor)
+        if len(names) != len(set(names)):
+            raise OSError("directory contains duplicate names")
+        for raw_name in sorted(names):
+            name = _safe_leaf_name(str(raw_name))
+            relative = f"{relative_root}/{name}"
+            info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                child = _open_directory_at(descriptor, name)
+                descriptors.append(child)
+                bindings.append((descriptor, name, child))
+                directories.add(relative)
+                walk(child, relative)
+            elif stat.S_ISREG(info.st_mode):
+                child = _open_regular_at(descriptor, name)
+                descriptors.append(child)
+                files[relative] = _snapshot_open_file(
+                    child,
+                    descriptor,
+                    name,
+                    relative,
+                    capture_limit=capture_limits.get(relative),
+                )
+            else:
+                raise OSError("tree contains an alias or special entry")
+
+    try:
+        walk(root_descriptor, root_relative)
+        inventory = _FdInventory(
+            files=files,
+            directories=tuple(sorted(directories)),
+            directory_bindings=tuple(bindings),
+            descriptors=tuple(descriptors),
+        )
+        inventory.revalidate()
+        return inventory
+    except OSError:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+
+
+@dataclass
+class _CusparseLtOpenTree:
+    venv_root: Path
+    root_descriptor: int
+    site_descriptor: int
+    package_descriptor: int
+    dist_descriptor: int
+    directory_bindings: tuple[tuple[int, str, int], ...]
+    descriptors: tuple[int, ...]
+
+    def revalidate(self) -> None:
+        linked_root = self.venv_root.lstat()
+        opened_root = os.fstat(self.root_descriptor)
+        _validate_directory_info(linked_root)
+        _validate_directory_info(opened_root)
+        if not _same_inode(linked_root, opened_root):
+            raise OSError("virtualenv root binding changed")
+        for parent_descriptor, name, descriptor in self.directory_bindings:
+            _verify_directory_binding(parent_descriptor, name, descriptor)
+
+    def close(self) -> None:
+        for descriptor in reversed(self.descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _open_cusparselt_tree(
+    python: Path,
+    plan: DependencyPlan,
+    contract: _CusparseLtNormalizationContract,
+) -> _CusparseLtOpenTree:
+    _require_linux_fd_security()
+    logical_python = _validated_venv_python_path(Path(python))
+    venv_root = logical_python.parent.parent
+    descriptors: list[int] = []
+    bindings: list[tuple[int, str, int]] = []
+    try:
+        root_descriptor = _open_directory_path(venv_root)
+        descriptors.append(root_descriptor)
+        current = root_descriptor
+        for name in (
+            "lib",
+            f"python{plan.python_abi.version[0]}.{plan.python_abi.version[1]}",
+            "site-packages",
+        ):
+            child = _open_directory_at(current, name)
+            descriptors.append(child)
+            bindings.append((current, name, child))
+            current = child
+        site_descriptor = current
+
+        expected_dist_folded = contract.dist_info.casefold().replace("_", "-")
+        distribution_prefix = f"{contract.distribution.casefold()}-"
+        candidates = [
+            name
+            for name in os.listdir(site_descriptor)
+            if str(name).casefold().replace("_", "-").startswith(distribution_prefix)
+            and str(name).casefold().endswith(".dist-info")
+        ]
+        if (
+            len(candidates) != 1
+            or str(candidates[0]).casefold().replace("_", "-")
+            != expected_dist_folded
+            or str(candidates[0]) != contract.dist_info
+        ):
+            raise DependencyError(
+                "CUSPARSELT_METADATA_INVALID",
+                "the installed cuSPARSELt distribution identity is not unique and exact",
+            )
+
+        current = site_descriptor
+        for name in _safe_installed_relative(contract.package_root).parts:
+            child = _open_directory_at(current, name)
+            descriptors.append(child)
+            bindings.append((current, name, child))
+            current = child
+        package_descriptor = current
+        dist_parts = _safe_installed_relative(contract.dist_info).parts
+        if len(dist_parts) != 1:
+            raise DependencyError(
+                "CUSPARSELT_CONTRACT_INVALID",
+                "the audited cuSPARSELt dist-info directory is not a direct child",
+            )
+        dist_descriptor = _open_directory_at(site_descriptor, dist_parts[0])
+        descriptors.append(dist_descriptor)
+        bindings.append((site_descriptor, dist_parts[0], dist_descriptor))
+        tree = _CusparseLtOpenTree(
+            venv_root=venv_root,
+            root_descriptor=root_descriptor,
+            site_descriptor=site_descriptor,
+            package_descriptor=package_descriptor,
+            dist_descriptor=dist_descriptor,
+            directory_bindings=tuple(bindings),
+            descriptors=tuple(descriptors),
+        )
+        tree.revalidate()
+        return tree
+    except DependencyError:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+    except OSError as exc:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise DependencyError(
+            "CUSPARSELT_TREE_UNSAFE",
+            "the installed cuSPARSELt tree could not be opened without following aliases",
+        ) from exc
+
+
+def _parse_cusparselt_record(
+    encoded: bytes,
+    contract: _CusparseLtNormalizationContract,
+) -> dict[str, tuple[str, str]]:
+    try:
+        text = encoded.decode("utf-8")
+        rows = list(csv.reader(io.StringIO(text, newline="")))
+    except (UnicodeError, csv.Error) as exc:
+        raise DependencyError(
+            "CUSPARSELT_METADATA_INVALID",
+            "the installed cuSPARSELt RECORD is malformed",
+        ) from exc
+    parsed: dict[str, tuple[str, str]] = {}
+    for row in rows:
+        if len(row) != 3:
+            raise DependencyError(
+                "CUSPARSELT_METADATA_INVALID",
+                "the installed cuSPARSELt RECORD is malformed",
+            )
+        relative, digest, size = row
+        _safe_installed_relative(relative)
+        if relative in parsed:
+            raise DependencyError(
+                "CUSPARSELT_METADATA_INVALID",
+                "the installed cuSPARSELt RECORD contains duplicate paths",
+            )
+        parsed[relative] = (digest, size)
+    if set(parsed) != set(contract.record_order):
+        raise DependencyError(
+            "CUSPARSELT_METADATA_INVALID",
+            "the installed cuSPARSELt RECORD file set is not the audited set",
+        )
+    return parsed
+
+
+def _metadata_header_values(encoded: bytes, name: str) -> list[str]:
+    try:
+        text = encoded.decode("utf-8")
+    except UnicodeError as exc:
+        raise DependencyError(
+            "CUSPARSELT_METADATA_INVALID",
+            "the installed cuSPARSELt METADATA is not UTF-8",
+        ) from exc
+    prefix = f"{name}: "
+    values: list[str] = []
+    for line in text.splitlines():
+        if not line:
+            break
+        if line.startswith(prefix):
+            values.append(line[len(prefix) :])
+    return values
+
+
+def _validate_aarch64_elf(
+    library: _OpenFileSnapshot, loader: Callable[[str], object]
+) -> None:
+    try:
+        before = os.fstat(library.descriptor)
+        _validate_regular_info(before)
+        if _stat_identity(before) != library.identity or library.size < 20:
+            raise OSError("library changed after hashing")
+        header = library.prefix
+        if header[:4] != b"\x7fELF" or header[4] != 2 or header[5] not in {1, 2}:
+            raise OSError("library is not ELF64")
+        byte_order = "little" if header[5] == 1 else "big"
+        if int.from_bytes(header[18:20], byte_order) != 183:
+            raise OSError("library is not AArch64")
+        descriptor_path = f"/proc/self/fd/{library.descriptor}"
+        proc_info = os.stat(descriptor_path)
+        if not _same_inode(before, proc_info):
+            raise OSError("proc descriptor does not reference the hashed library")
+        loaded = loader(descriptor_path)
+        after = os.fstat(library.descriptor)
+        proc_after = os.stat(descriptor_path)
+        _validate_regular_info(after)
+        if (
+            _stat_identity(after) != library.identity
+            or not _same_inode(after, proc_after)
+        ):
+            raise OSError("library changed while loaded")
+        del loaded
+    except (OSError, ValueError) as exc:
+        raise DependencyError(
+            "CUSPARSELT_LIBRARY_INVALID",
+            "the installed cuSPARSELt library is not a loadable AArch64 ELF64 object",
+        ) from exc
+
+
+def _inspect_cusparselt_metadata(
+    tree: _CusparseLtOpenTree,
+    plan: DependencyPlan,
+    *,
+    loader: Callable[[str], object],
+) -> tuple[str, dict[str, object], bytes, bytes]:
+    identity = _cusparselt_normalization_identity(plan)
+    if identity is None:
+        raise DependencyError(
+            "CUSPARSELT_NORMALIZATION_UNSUPPORTED",
+            "the cuSPARSELt correction is not applicable to this dependency plan",
+        )
+    contract = _CUSPARSELT_NORMALIZATION_CONTRACT
+    original_record, normalized_record = _validate_cusparselt_contract(contract)
+    fixed_by_path = {
+        relative: (digest, size)
+        for relative, digest, size in contract.fixed_files
+    }
+    capture_limits = {
+        contract.wheel_relative: max(
+            len(contract.original_wheel), len(contract.normalized_wheel)
+        ),
+        contract.record_relative: STATE_MAX_BYTES,
+        contract.metadata_relative: fixed_by_path[contract.metadata_relative][1],
+    }
+    package_inventory: _FdInventory | None = None
+    dist_inventory: _FdInventory | None = None
+    try:
+        package_inventory = _inventory_open_tree(
+            tree.package_descriptor,
+            contract.package_root,
+            capture_limits=capture_limits,
+        )
+        dist_inventory = _inventory_open_tree(
+            tree.dist_descriptor,
+            contract.dist_info,
+            capture_limits=capture_limits,
+        )
+        files = {**package_inventory.files, **dist_inventory.files}
+        expected_package_directories = tuple(
+            sorted(
+                f"{contract.package_root}/{relative}"
+                for relative in contract.package_directories
+            )
+        )
+        if (
+            set(files) != set(contract.record_order)
+            or package_inventory.directories != expected_package_directories
+            or dist_inventory.directories
+        ):
+            raise DependencyError(
+                "CUSPARSELT_FILE_SET_INVALID",
+                "the installed cuSPARSELt file set is not the audited wheel file set",
+            )
+
+        wheel = files[contract.wheel_relative].data
+        record = files[contract.record_relative].data
+        metadata = files[contract.metadata_relative].data
+        if wheel is None or record is None or metadata is None:
+            raise DependencyError(
+                "CUSPARSELT_TREE_UNSAFE",
+                "the installed cuSPARSELt metadata files could not be captured from their audited descriptors",
+            )
+        parsed_record = _parse_cusparselt_record(record, contract)
+        if wheel == contract.original_wheel and record == original_record:
+            state = "original"
+        elif wheel == contract.normalized_wheel and record == normalized_record:
+            state = "normalized"
+        else:
+            raise DependencyError(
+                "CUSPARSELT_STATE_INVALID",
+                "the installed cuSPARSELt metadata is hybrid or not an exact audited state",
+            )
+
+        for relative in contract.record_order:
+            digest_field, size_field = parsed_record[relative]
+            if relative == contract.record_relative:
+                if digest_field or size_field:
+                    raise DependencyError(
+                        "CUSPARSELT_METADATA_INVALID",
+                        "the installed cuSPARSELt RECORD row must be unhashed",
+                    )
+                continue
+            snapshot = files[relative]
+            expected_digest_field = (
+                f"sha256={_record_sha256_value(snapshot.digest)}"
+            )
+            if digest_field != expected_digest_field or size_field != str(snapshot.size):
+                raise DependencyError(
+                    "CUSPARSELT_METADATA_INVALID",
+                    "the installed cuSPARSELt RECORD hash or size does not match its file",
+                )
+
+        for relative, expected_digest, expected_size in contract.fixed_files:
+            snapshot = files[relative]
+            if snapshot.digest != expected_digest or snapshot.size != expected_size:
+                raise DependencyError(
+                    "CUSPARSELT_FILE_HASH_MISMATCH",
+                    "an installed cuSPARSELt wheel file does not match the audited identity",
+                )
+        if (
+            _metadata_header_values(metadata, "Name") != [contract.distribution]
+            or _metadata_header_values(metadata, "Version") != [contract.version]
+        ):
+            raise DependencyError(
+                "CUSPARSELT_METADATA_INVALID",
+                "the installed cuSPARSELt METADATA name or version is not exact",
+            )
+        _validate_aarch64_elf(files[contract.library_relative], loader)
+        package_inventory.revalidate()
+        dist_inventory.revalidate()
+        tree.revalidate()
+        report = {
+            **identity,
+            "state": state,
+            "applied": False,
+            "wheelSha256": files[contract.wheel_relative].digest,
+            "recordSha256": files[contract.record_relative].digest,
+        }
+        return state, report, original_record, normalized_record
+    except DependencyError:
+        raise
+    except (KeyError, OSError) as exc:
+        raise DependencyError(
+            "CUSPARSELT_TREE_UNSAFE",
+            "the installed cuSPARSELt tree changed while it was inspected",
+        ) from exc
+    finally:
+        if package_inventory is not None:
+            package_inventory.close()
+        if dist_inventory is not None:
+            dist_inventory.close()
+
+
+@dataclass
+class _StagedLeaf:
+    name: str
+    descriptor: int
+    identity: tuple[int, ...]
+    published: bool = False
+
+
+def _write_fsynced_temporary_at(
+    directory_descriptor: int, label: str, encoded: bytes
+) -> _StagedLeaf:
+    name = f".{_safe_leaf_name(label)}.{uuid.uuid4().hex}.tmp"
+    flags = (
+        os.O_RDWR
+        | os.O_CREAT
+        | os.O_EXCL
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(name, flags, 0o644, dir_fd=directory_descriptor)
+        view = memoryview(encoded)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("temporary metadata write made no progress")
+            view = view[written:]
+        os.fsync(descriptor)
+        opened = os.fstat(descriptor)
+        linked = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
+        _validate_regular_info(opened)
+        _validate_regular_info(linked)
+        if (
+            opened.st_size != len(encoded)
+            or _stat_identity(opened) != _stat_identity(linked)
+        ):
+            raise OSError("temporary metadata identity changed")
+        return _StagedLeaf(name, descriptor, _stat_identity(opened))
+    except OSError as exc:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            os.unlink(name, dir_fd=directory_descriptor)
+        except OSError:
+            pass
+        raise DependencyError(
+            "CUSPARSELT_WRITE_FAILED",
+            "the normalized cuSPARSELt metadata could not be staged safely",
+        ) from exc
+
+
+def _dist_info_leaf(contract_relative: str, contract: _CusparseLtNormalizationContract) -> str:
+    relative = _safe_installed_relative(contract_relative)
+    if relative.parts[:-1] != (contract.dist_info,):
+        raise DependencyError(
+            "CUSPARSELT_CONTRACT_INVALID",
+            "the audited cuSPARSELt metadata leaf is outside dist-info",
+        )
+    return _safe_leaf_name(relative.name)
+
+
+def _read_leaf_bytes_at(
+    directory_descriptor: int, name: str, *, max_bytes: int
+) -> bytes:
+    descriptor: int | None = None
+    try:
+        descriptor = _open_regular_at(directory_descriptor, name)
+        snapshot = _snapshot_open_file(
+            descriptor,
+            directory_descriptor,
+            name,
+            name,
+            capture_limit=max_bytes,
+        )
+        _verify_file_snapshot(snapshot)
+        if snapshot.data is None:
+            raise OSError("metadata leaf was not captured")
+        return snapshot.data
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _verify_published_leaf(
+    directory_descriptor: int,
+    target_name: str,
+    staged: _StagedLeaf,
+    expected: bytes,
+) -> None:
+    linked = os.stat(
+        target_name,
+        dir_fd=directory_descriptor,
+        follow_symlinks=False,
+    )
+    opened = os.fstat(staged.descriptor)
+    _validate_regular_info(linked)
+    _validate_regular_info(opened)
+    if (
+        not _same_inode(linked, opened)
+        or (opened.st_dev, opened.st_ino, stat.S_IFMT(opened.st_mode), opened.st_size)
+        != staged.identity[:4]
+    ):
+        raise OSError("published metadata leaf does not match its staged inode")
+    snapshot = _snapshot_open_file(
+        staged.descriptor,
+        directory_descriptor,
+        target_name,
+        target_name,
+        capture_limit=len(expected),
+    )
+    _verify_file_snapshot(snapshot)
+    if snapshot.data != expected:
+        raise OSError("published metadata leaf bytes changed")
+
+
+def _cleanup_staged_leaf(directory_descriptor: int, staged: _StagedLeaf | None) -> None:
+    if staged is None:
+        return
+    try:
+        os.close(staged.descriptor)
+    except OSError:
+        pass
+    if not staged.published:
+        try:
+            os.unlink(staged.name, dir_fd=directory_descriptor)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+
+def _publish_cusparselt_metadata(
+    tree: _CusparseLtOpenTree,
+    contract: _CusparseLtNormalizationContract,
+    original_record: bytes,
+    normalized_record: bytes,
+) -> None:
+    wheel_name = _dist_info_leaf(contract.wheel_relative, contract)
+    record_name = _dist_info_leaf(contract.record_relative, contract)
+    wheel_staged: _StagedLeaf | None = None
+    record_staged: _StagedLeaf | None = None
+    try:
+        tree.revalidate()
+        wheel_staged = _write_fsynced_temporary_at(
+            tree.dist_descriptor, "WHEEL", contract.normalized_wheel
+        )
+        record_staged = _write_fsynced_temporary_at(
+            tree.dist_descriptor, "RECORD", normalized_record
+        )
+        tree.revalidate()
+        if (
+            _read_leaf_bytes_at(
+                tree.dist_descriptor,
+                wheel_name,
+                max_bytes=len(contract.original_wheel),
+            )
+            != contract.original_wheel
+            or _read_leaf_bytes_at(
+                tree.dist_descriptor,
+                record_name,
+                max_bytes=len(original_record),
+            )
+            != original_record
+        ):
+            raise DependencyError(
+                "CUSPARSELT_STATE_CHANGED",
+                "cuSPARSELt metadata changed while normalization was staged",
+            )
+
+        os.replace(
+            wheel_staged.name,
+            wheel_name,
+            src_dir_fd=tree.dist_descriptor,
+            dst_dir_fd=tree.dist_descriptor,
+        )
+        wheel_staged.published = True
+        _verify_published_leaf(
+            tree.dist_descriptor,
+            wheel_name,
+            wheel_staged,
+            contract.normalized_wheel,
+        )
+        os.fsync(tree.dist_descriptor)
+        tree.revalidate()
+
+        os.replace(
+            record_staged.name,
+            record_name,
+            src_dir_fd=tree.dist_descriptor,
+            dst_dir_fd=tree.dist_descriptor,
+        )
+        record_staged.published = True
+        _verify_published_leaf(
+            tree.dist_descriptor,
+            record_name,
+            record_staged,
+            normalized_record,
+        )
+        os.fsync(tree.dist_descriptor)
+        tree.revalidate()
+    except DependencyError:
+        raise
+    except (OSError, TypeError) as exc:
+        raise DependencyError(
+            "CUSPARSELT_WRITE_FAILED",
+            "the normalized cuSPARSELt metadata could not be published through its pinned directory descriptor",
+        ) from exc
+    finally:
+        _cleanup_staged_leaf(tree.dist_descriptor, wheel_staged)
+        _cleanup_staged_leaf(tree.dist_descriptor, record_staged)
+
+
+def normalize_cusparselt_metadata(
+    python: Path,
+    plan: DependencyPlan,
+    *,
+    _cdll_loader: Callable[[str], object] = ctypes.CDLL,
+) -> dict[str, object] | None:
+    """Normalize the one audited installed ARM64 wheel; never touch caches."""
+
+    if _cusparselt_normalization_identity(plan) is None:
+        return None
+    contract = _CUSPARSELT_NORMALIZATION_CONTRACT
+    tree = _open_cusparselt_tree(python, plan, contract)
+    try:
+        state, report, original_record, normalized_record = (
+            _inspect_cusparselt_metadata(tree, plan, loader=_cdll_loader)
+        )
+        if state == "normalized":
+            return report
+        if tree.venv_root.name != "venv.__modly_staging":
+            raise DependencyError(
+                "CUSPARSELT_NOT_STAGING",
+                "cuSPARSELt metadata may be changed only inside the setup staging virtualenv",
+            )
+        _publish_cusparselt_metadata(
+            tree, contract, original_record, normalized_record
+        )
+        final_state, final_report, *_rest = _inspect_cusparselt_metadata(
+            tree, plan, loader=_cdll_loader
+        )
+        if final_state != "normalized":
+            raise DependencyError(
+                "CUSPARSELT_POSTCONDITION_FAILED",
+                "the normalized cuSPARSELt metadata did not reach its exact final state",
+            )
+        final_report["applied"] = True
+        return final_report
+    finally:
+        tree.close()
+
+
+def _verify_cusparselt_metadata(
+    python: Path,
+    plan: DependencyPlan,
+    *,
+    _cdll_loader: Callable[[str], object] = ctypes.CDLL,
+) -> dict[str, object] | None:
+    if _cusparselt_normalization_identity(plan) is None:
+        return None
+    contract = _CUSPARSELT_NORMALIZATION_CONTRACT
+    tree = _open_cusparselt_tree(python, plan, contract)
+    try:
+        state, report, *_rest = _inspect_cusparselt_metadata(
+            tree, plan, loader=_cdll_loader
+        )
+        if state != "normalized":
+            raise DependencyError(
+                "CUSPARSELT_NOT_NORMALIZED",
+                "the installed cuSPARSELt metadata is not in its required final state",
+            )
+        return report
+    finally:
+        tree.close()
+
+
 def isolated_pip_command(
     python: Path,
     arguments: Sequence[str],
@@ -616,7 +2320,7 @@ def isolated_pip_command(
     """Construct pip without user config/index overrides, retaining Modly cache."""
 
     command = [
-        str(Path(python).resolve()),
+        str(_validated_venv_python_path(Path(python))),
         "-m",
         "pip",
         "--isolated",
@@ -663,10 +2367,19 @@ def _normalize_profile(value: object) -> str:
 
 
 def select_dependency_plan(
-    context: Mapping[str, object], requested_profile: str | None = None
+    context: Mapping[str, object],
+    requested_profile: str | None = None,
+    *,
+    interpreter_fingerprint: Mapping[str, object] | None = None,
 ) -> DependencyPlan:
     """Resolve a deterministic dependency lane from Modly setup metadata."""
 
+    python_abi = python_abi_from_fingerprint(
+        _current_python_fingerprint()
+        if interpreter_fingerprint is None
+        else interpreter_fingerprint
+    )
+    python_lane = _python_requirement_lane_for_abi(python_abi)
     system = _normalize_system(context.get("platform"))
     arch = _normalize_arch(context.get("arch"))
     accelerator = str(context.get("accelerator") or "").strip().casefold()
@@ -733,8 +2446,8 @@ def select_dependency_plan(
             arch=arch,
             gpu_sm=gpu_sm,
             torch_lane="cu124",
-            torch_requirements=_torch_requirements("cu124", arch),
-            torch_index=PYTORCH_INDEXES["cu124"],
+            torch_requirements=python_lane.torch_requirements_for("cu124", arch),
+            torch_index=python_lane.torch_index_for("cu124"),
             attention_backend="flash_attn" if use_flash else "xformers",
             install_flash_attn=use_flash,
             install_native_stack=True,
@@ -742,6 +2455,7 @@ def select_dependency_plan(
             note=(
                 "Complete pinned upstream dependency graph; native extensions are built locally."
             ),
+            python_abi=python_abi,
         )
 
     # Portable is deliberately separate: Modly compatibility overlays replace
@@ -751,8 +2465,9 @@ def select_dependency_plan(
         # Modly 0.4.2 reports 128 for every driver major >=570 and does not
         # expose the raw driver version.  Selecting cu130 from that capped hint
         # would be unsafe: CUDA 13 wheels require a newer driver than many
-        # valid 12.8 hosts.  The official cu128 CPython 3.11 wheels contain the
-        # required Blackwell kernels on Linux ARM64/x64 and Windows x64.
+        # valid 12.8 hosts.  The separate official cu128 CPython 3.11 and 3.12
+        # wheels contain the required Blackwell kernels on Linux ARM64/x64 and
+        # Windows x64.
         lane = "cu128"
         note = "Experimental portable cu128 compatibility lane for SM 10.0 or newer."
     elif arch == "arm64":
@@ -773,13 +2488,14 @@ def select_dependency_plan(
         arch=arch,
         gpu_sm=gpu_sm,
         torch_lane=lane,
-        torch_requirements=_torch_requirements(lane, arch),
-        torch_index=PYTORCH_INDEXES[lane],
+        torch_requirements=python_lane.torch_requirements_for(lane, arch),
+        torch_index=python_lane.torch_index_for(lane),
         attention_backend="sdpa",
         install_flash_attn=False,
         install_native_stack=False,
         support_level="experimental" if arch == "arm64" or gpu_sm >= 100 else "compatibility",
         note=note,
+        python_abi=python_abi,
     )
 
 
@@ -815,24 +2531,14 @@ def _deduplicated_requirements(requirements: Sequence[str]) -> tuple[str, ...]:
 def _torch_platform_transitive_requirements(
     plan: DependencyPlan,
 ) -> tuple[str, ...]:
-    key = (plan.torch_lane, plan.system, plan.arch)
-    supported: dict[tuple[str, str, str], tuple[str, ...]] = {
-        ("cu124", "linux", "x64"): TORCH_CU124_LINUX_X64_TRANSITIVE_REQUIREMENTS,
-        ("cu124", "win32", "x64"): (),
-        ("cu126", "linux", "arm64"): (),
-        ("cu128", "linux", "x64"): TORCH_CU128_LINUX_TRANSITIVE_REQUIREMENTS,
-        ("cu128", "linux", "arm64"): TORCH_CU128_LINUX_TRANSITIVE_REQUIREMENTS,
-        ("cu128", "win32", "x64"): (),
-    }
-    if key not in supported:
-        raise DependencyError(
-            "DEPENDENCY_PLAN_UNSUPPORTED",
-            "the selected OS/architecture/Torch lane has no audited dependency closure",
-        )
-    expected_torch = _torch_requirements(plan.torch_lane, plan.arch)
+    python_lane = _python_requirement_lane(plan)
+    torch_platform = python_lane.torch_platform_for(
+        plan.torch_lane, plan.system, plan.arch
+    )
+    expected_torch = python_lane.torch_requirements_for(plan.torch_lane, plan.arch)
     if (
         tuple(plan.torch_requirements) != expected_torch
-        or plan.torch_index != PYTORCH_INDEXES.get(plan.torch_lane)
+        or plan.torch_index != python_lane.torch_index_for(plan.torch_lane)
     ):
         raise DependencyError(
             "DEPENDENCY_PLAN_INVALID",
@@ -845,7 +2551,7 @@ def _torch_platform_transitive_requirements(
     ):
         raise DependencyError(
             "DEPENDENCY_PLAN_INVALID",
-            "exact-upstream is only locked for the CPython 3.11 x64 cu124 lanes",
+            "exact-upstream is only locked for explicit CPython 3.11 or 3.12 x64 cu124 lanes",
         )
     if plan.profile == "exact-upstream":
         expected_attention = "flash_attn" if plan.system == "linux" else "xformers"
@@ -870,65 +2576,122 @@ def _torch_platform_transitive_requirements(
             "DEPENDENCY_PLAN_INVALID",
             "the dependency profile flags do not match the audited closure",
         )
-    return supported[key]
+    return torch_platform
 
 
 def constraint_requirements(plan: DependencyPlan) -> tuple[str, ...]:
-    """Return the complete exact CPython 3.11 dependency closure for a plan."""
+    """Return the complete exact dependency closure for one explicit Python lane."""
 
+    python_abi_from_fingerprint(
+        {
+            "implementation": plan.python_abi.implementation,
+            "version": plan.python_abi.version,
+            "cache_tag": plan.python_abi.cache_tag,
+            "abiflags": plan.python_abi.abiflags,
+            "soabi": plan.python_abi.soabi,
+            "platform": plan.python_abi.platform,
+            "machine": plan.python_abi.machine,
+            "pointer_bits": plan.python_abi.pointer_bits,
+        }
+    )
+    python_lane = _python_requirement_lane(plan)
     torch_platform = _torch_platform_transitive_requirements(plan)
     requirements: list[str] = [
-        *BOOTSTRAP_REQUIREMENTS,
-        *BASE_REQUIREMENTS,
-        *COMMON_TRANSITIVE_REQUIREMENTS,
+        *python_lane.bootstrap,
+        *python_lane.base,
+        *python_lane.common_transitive,
         f"{OVOXEL_CPU_DISTRIBUTION}=={OVOXEL_CPU_VERSION}",
     ]
     if plan.arch == "x64":
-        requirements.extend(X64_RENDER_REQUIREMENTS)
-        requirements.extend(X64_RENDER_COMMON_TRANSITIVE_REQUIREMENTS)
+        requirements.extend(python_lane.x64_render)
+        requirements.extend(python_lane.x64_render_common)
         requirements.extend(
-            LINUX_X64_RENDER_TRANSITIVE_REQUIREMENTS
+            python_lane.linux_x64_render
             if plan.system == "linux"
-            else WINDOWS_X64_RENDER_TRANSITIVE_REQUIREMENTS
+            else python_lane.windows_x64_render
         )
     requirements.extend(plan.torch_requirements)
-    try:
-        requirements.extend(TORCH_LANE_COMMON_TRANSITIVE_REQUIREMENTS[plan.torch_lane])
-    except KeyError as exc:
-        raise DependencyError(
-            "DEPENDENCY_PLAN_UNSUPPORTED",
-            "the selected Torch lane has no audited dependency closure",
-        ) from exc
+    requirements.extend(python_lane.torch_common_for(plan.torch_lane))
     requirements.extend(torch_platform)
     if plan.install_native_stack:
-        requirements.extend(EXACT_SPARSE_REQUIREMENTS)
+        requirements.extend(python_lane.exact_sparse)
         requirements.extend(
-            (
-                TORCH_SCATTER_REQUIREMENT,
-                XFORMERS_REQUIREMENT,
-                WINDOWS_TRITON_REQUIREMENT
-                if plan.system == "win32"
-                else LINUX_TRITON_REQUIREMENT,
-                *(
-                    (FLASH_ATTN_REQUIREMENT,)
-                    if plan.install_flash_attn
-                    else ()
-                ),
-                *NATIVE_SOURCE_DISTRIBUTION_REQUIREMENTS,
-                *EXACT_TRANSITIVE_REQUIREMENTS,
-            )
+            python_lane.exact_native_for(plan.system, plan.install_flash_attn)
         )
     return _deduplicated_requirements(requirements)
 
 
+def _cusparselt_normalization_identity(
+    plan: DependencyPlan,
+) -> dict[str, object] | None:
+    """Return the audited correction identity for its one applicable plan."""
+
+    if not (
+        plan.system == "linux"
+        and plan.arch == "arm64"
+        and plan.torch_lane == "cu128"
+    ):
+        return None
+    if plan.python_abi.lane not in {"cp311", "cp312"}:
+        raise DependencyError(
+            "CUSPARSELT_NORMALIZATION_UNSUPPORTED",
+            "the cuSPARSELt metadata correction has no audited Python ABI lane",
+        )
+    torch_platform = _torch_platform_transitive_requirements(plan)
+    if (
+        tuple(plan.torch_requirements)
+        != ("torch==2.9.1+cu128", "torchvision==0.24.1")
+        or plan.torch_index != PYTORCH_INDEXES["cu128"]
+        or tuple(
+            requirement
+            for requirement in torch_platform
+            if _requirement_name(requirement) == "nvidia-cusparselt-cu12"
+        )
+        != ("nvidia-cusparselt-cu12==0.7.1",)
+    ):
+        raise DependencyError(
+            "CUSPARSELT_NORMALIZATION_UNSUPPORTED",
+            "the selected Torch closure does not match the audited cuSPARSELt correction",
+        )
+    contract = _CUSPARSELT_NORMALIZATION_CONTRACT
+    return {
+        "schema": contract.schema,
+        "distribution": contract.distribution,
+        "version": contract.version,
+        "pythonLanes": ["cp311", "cp312"],
+        "platform": "linux",
+        "architecture": "arm64",
+        "torch": "torch==2.9.1+cu128",
+        "library": {
+            "path": contract.library_relative,
+            "elfClass": 64,
+            "machine": 183,
+            "dlopenRequired": True,
+        },
+        "wheel": {
+            "path": contract.wheel_relative,
+            "beforeTag": "py3-none-manylinux2014_sbsa",
+            "afterTag": "py3-none-manylinux2014_aarch64",
+            "beforeSha256": hashlib.sha256(contract.original_wheel).hexdigest(),
+            "afterSha256": hashlib.sha256(contract.normalized_wheel).hexdigest(),
+        },
+        "record": {
+            "path": contract.record_relative,
+            "beforeSha256": contract.original_record_sha256,
+            "afterSha256": contract.normalized_record_sha256,
+        },
+    }
+
+
 def dependency_lock_payload(plan: DependencyPlan) -> dict[str, object]:
+    python_lane = _python_requirement_lane(plan)
     payload: dict[str, object] = {
         "schema": DEPENDENCY_SCHEMA,
         "plan": plan.payload(),
-        "bootstrap": list(BOOTSTRAP_REQUIREMENTS),
-        "base": list(BASE_REQUIREMENTS),
+        "bootstrap": list(python_lane.bootstrap),
+        "base": list(python_lane.base),
         "constraints": list(constraint_requirements(plan)),
-        "platform": list(X64_RENDER_REQUIREMENTS if plan.arch == "x64" else ()),
+        "platform": list(python_lane.x64_render if plan.arch == "x64" else ()),
         # Both profiles expose the compatibility backend.  Exact additionally
         # exposes the full native upstream backend, but still installs this
         # small CPU operator so users can switch backend without Repair.
@@ -956,15 +2719,26 @@ def dependency_lock_payload(plan: DependencyPlan) -> dict[str, object]:
     }
     if plan.install_native_stack:
         payload["exact"] = {
-            "extra": list(X64_RENDER_REQUIREMENTS),
-            "sparse": list(EXACT_SPARSE_REQUIREMENTS),
-            "torchScatter": TORCH_SCATTER_REQUIREMENT,
-            "xformers": XFORMERS_REQUIREMENT,
-            "flashAttn": FLASH_ATTN_REQUIREMENT if plan.install_flash_attn else None,
-            "triton": (
-                WINDOWS_TRITON_REQUIREMENT
-                if plan.system == "win32"
-                else LINUX_TRITON_REQUIREMENT
+            "extra": list(python_lane.x64_render),
+            "sparse": list(python_lane.exact_sparse),
+            "torchScatter": python_lane.exact_requirement_for(
+                "torch-scatter", plan.system, plan.install_flash_attn
+            ),
+            "torchScatterLinks": python_lane.torch_scatter_links,
+            "xformers": python_lane.exact_requirement_for(
+                "xformers", plan.system, plan.install_flash_attn
+            ),
+            "flashAttn": (
+                python_lane.exact_requirement_for(
+                    "flash-attn", plan.system, plan.install_flash_attn
+                )
+                if plan.install_flash_attn
+                else None
+            ),
+            "triton": python_lane.exact_requirement_for(
+                "triton-windows" if plan.system == "win32" else "triton",
+                plan.system,
+                plan.install_flash_attn,
             ),
             "sources": [asdict(item) for item in SOURCE_ARCHIVES],
             "sourceTreeSha256": NATIVE_SOURCE_TREE_SHA256[plan.system],
@@ -977,6 +2751,9 @@ def dependency_lock_payload(plan: DependencyPlan) -> dict[str, object]:
         payload["portable"] = {
             "overlays": "pure-torch-sparse-sdpa-software-renderer-v2",
         }
+    normalization = _cusparselt_normalization_identity(plan)
+    if normalization is not None:
+        payload["installedMetadataNormalization"] = normalization
     return payload
 
 
@@ -992,12 +2769,16 @@ def dependency_state_payload(
 ) -> dict[str, object]:
     """State setup must compare before reusing an existing venv."""
 
-    return {
+    payload = {
         "schema": DEPENDENCY_SCHEMA,
         "lockDigest": dependency_lock_digest(plan),
         "plan": plan.payload(),
         "interpreter": dict(interpreter_fingerprint),
     }
+    normalization = _cusparselt_normalization_identity(plan)
+    if normalization is not None:
+        payload["installedMetadataNormalization"] = normalization
+    return payload
 
 
 def state_matches(path: Path, expected: Mapping[str, object]) -> bool:
@@ -2195,19 +3976,47 @@ def cpu_build_environment(
 portable_build_environment = cpu_build_environment
 
 
-def _assert_target_python(python: Path) -> None:
-    result = subprocess.run(
-        [str(python), "-I", "-S", "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        env=sanitize_subprocess_environment(),
+def _assert_target_python(
+    python: Path, expected: PythonABI | None = None
+) -> PythonABI:
+    probe = (
+        "import json, struct, sys, sysconfig; "
+        "print(json.dumps({"
+        "'implementation': sys.implementation.name, "
+        "'version': list(sys.version_info[:2]), "
+        "'cache_tag': sys.implementation.cache_tag, "
+        "'abiflags': getattr(sys, 'abiflags', ''), "
+        "'soabi': sysconfig.get_config_var('SOABI'), "
+        "'platform': sysconfig.get_platform().lower(), "
+        "'machine': __import__('platform').machine().lower(), "
+        "'pointer_bits': struct.calcsize('P') * 8"
+        "}, sort_keys=True))"
     )
-    if result.stdout.strip() != "3.11":
-        raise DependencyError(
-            "PYTHON_ABI_UNSUPPORTED", "this release targets Modly's CPython 3.11 runtime"
+    try:
+        result = subprocess.run(
+            [str(python), "-I", "-S", "-c", probe],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=sanitize_subprocess_environment(),
         )
+        fingerprint = json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        raise DependencyError(
+            "PYTHON_PROBE_FAILED", "the extension virtualenv Python ABI could not be inspected"
+        ) from exc
+    if not isinstance(fingerprint, dict):
+        raise DependencyError(
+            "PYTHON_PROBE_INVALID", "the extension virtualenv returned invalid ABI metadata"
+        )
+    actual = python_abi_from_fingerprint(fingerprint)
+    if expected is not None and actual != expected:
+        raise DependencyError(
+            "PYTHON_ABI_MISMATCH",
+            "the extension virtualenv Python ABI does not match the selected dependency lane",
+        )
+    return actual
 
 
 def _validate_linux_glibc(plan: DependencyPlan) -> None:
@@ -2236,13 +4045,12 @@ def install_dependencies(
 ) -> Path:
     """Install a complete pinned plan.  Every pip command is checked."""
 
-    python = Path(python).resolve()
-    if not python.is_file():
-        raise DependencyError("PYTHON_MISSING", "extension virtualenv Python is missing")
-    _assert_target_python(python)
+    python = _validated_venv_python_path(Path(python))
+    _assert_target_python(python, plan.python_abi)
     _validate_linux_glibc(plan)
     cache = _validated_cache_root(Path(cache_root))
     constraint_file = materialize_dependency_constraints(cache, plan)
+    python_lane = _python_requirement_lane(plan)
     env = sanitize_subprocess_environment(allow_network=True)
     if "PIP_CACHE_DIR" not in env:
         env["PIP_CACHE_DIR"] = str(_prepare_source_cache_directory(cache, "pip"))
@@ -2256,7 +4064,7 @@ def install_dependencies(
             "--only-binary=:all:",
             "--index-url",
             PYPI_INDEX,
-            *BOOTSTRAP_REQUIREMENTS,
+            *python_lane.bootstrap,
         ],
         env=env,
         runner=runner,
@@ -2273,8 +4081,8 @@ def install_dependencies(
             "--only-binary=:all:",
             "--index-url",
             PYPI_INDEX,
-            *BASE_REQUIREMENTS,
-            *(X64_RENDER_REQUIREMENTS if plan.arch == "x64" else ()),
+            *python_lane.base,
+            *(python_lane.x64_render if plan.arch == "x64" else ()),
         ],
         env=env,
         runner=runner,
@@ -2301,10 +4109,31 @@ def install_dependencies(
         constraint_file=constraint_file,
         constraint_plan=plan,
     )
+    if _cusparselt_normalization_identity(plan) is not None:
+        log("Normalizing audited cuSPARSELt ARM64 installed metadata")
+        normalize_cusparselt_metadata(python, plan)
 
     if plan.install_native_stack:
         build_env = native_build_environment(plan, cache_root, base_env=env)
         sources = prepare_native_sources(Path(cache_root), plan.system, log=log)
+        torch_scatter_requirement = python_lane.exact_requirement_for(
+            "torch-scatter", plan.system, plan.install_flash_attn
+        )
+        triton_requirement = python_lane.exact_requirement_for(
+            "triton-windows" if plan.system == "win32" else "triton",
+            plan.system,
+            plan.install_flash_attn,
+        )
+        xformers_requirement = python_lane.exact_requirement_for(
+            "xformers", plan.system, plan.install_flash_attn
+        )
+        flash_attn_requirement = (
+            python_lane.exact_requirement_for(
+                "flash-attn", plan.system, plan.install_flash_attn
+            )
+            if plan.install_flash_attn
+            else None
+        )
         _pip(
             python,
             [
@@ -2312,7 +4141,7 @@ def install_dependencies(
                 "--only-binary=:all:",
                 "--index-url",
                 PYPI_INDEX,
-                *EXACT_SPARSE_REQUIREMENTS,
+                *python_lane.exact_sparse,
             ],
             env=build_env,
             runner=runner,
@@ -2329,9 +4158,9 @@ def install_dependencies(
                 "--no-deps",
                 "--only-binary=:all:",
                 "--no-index",
-                TORCH_SCATTER_REQUIREMENT,
+                torch_scatter_requirement,
                 "--find-links",
-                TORCH_SCATTER_LINKS,
+                python_lane.torch_scatter_links,
             ],
             env=build_env,
             runner=runner,
@@ -2340,9 +4169,6 @@ def install_dependencies(
             network=True,
             constraint_file=constraint_file,
             constraint_plan=plan,
-        )
-        triton_requirement = (
-            WINDOWS_TRITON_REQUIREMENT if plan.system == "win32" else LINUX_TRITON_REQUIREMENT
         )
         _pip(
             python,
@@ -2370,7 +4196,7 @@ def install_dependencies(
                 "--only-binary=:all:",
                 "--index-url",
                 plan.torch_index,
-                XFORMERS_REQUIREMENT,
+                xformers_requirement,
             ],
             env=build_env,
             runner=runner,
@@ -2389,7 +4215,7 @@ def install_dependencies(
                     "--no-deps",
                     "--index-url",
                     PYPI_INDEX,
-                    FLASH_ATTN_REQUIREMENT,
+                    str(flash_attn_requirement),
                 ],
                 env=build_env,
                 runner=runner,
@@ -2470,6 +4296,7 @@ def verify_portable_cpu_extension(
     ``materialize_ovoxel_cpu_build`` and only then publish dependency state.
     """
 
+    python = _validated_venv_python_path(Path(python))
     smoke_env = cpu_build_environment(plan, cache_root, base_env=env)
     portable_identity = {
         "distribution": OVOXEL_CPU_DISTRIBUTION,
@@ -2600,7 +4427,7 @@ print(json.dumps({
             env=pip_check_env,
         )
         result = subprocess.run(
-            [str(Path(python).resolve()), "-I", "-c", script],
+            [str(python), "-I", "-c", script],
             check=True,
             capture_output=True,
             text=True,
@@ -2656,6 +4483,8 @@ def verify_dependencies(
             pass
         smoke_env["XDG_RUNTIME_DIR"] = str(xdg_runtime)
         smoke_env["EGL_PLATFORM"] = "surfaceless"
+    python = _validated_venv_python_path(Path(python))
+    _verify_cusparselt_metadata(python, plan)
     expected = expected_distribution_versions(plan)
     script = r'''
 import importlib
@@ -2811,7 +4640,7 @@ print(json.dumps({
     smoke_env["MODLY_LATO2_ATTN_BACKEND"] = plan.attention_backend
     try:
         completed = subprocess.run(
-            [str(Path(python).resolve()), "-I", "-c", script],
+            [str(python), "-I", "-c", script],
             check=True,
             capture_output=True,
             text=True,
@@ -2840,6 +4669,10 @@ __all__ = [
     "DependencyPlan",
     "NativeSources",
     "PortableCpuSources",
+    "PythonABI",
+    "PythonRequirementLane",
+    "PYTHON_REQUIREMENT_LANES",
+    "SUPPORTED_PYTHON_VERSIONS",
     "constraint_requirements",
     "dependency_lock_digest",
     "dependency_lock_payload",
@@ -2850,10 +4683,12 @@ __all__ = [
     "cpu_build_environment",
     "native_build_environment",
     "materialize_dependency_constraints",
+    "normalize_cusparselt_metadata",
     "prepare_build_workspace",
     "prepare_native_sources",
     "portable_build_environment",
     "prepare_portable_cpu_sources",
+    "python_abi_from_fingerprint",
     "sanitize_subprocess_environment",
     "select_dependency_plan",
     "state_matches",

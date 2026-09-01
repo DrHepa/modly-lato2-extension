@@ -83,14 +83,18 @@ build identity.
 
 ## Dependency closure
 
-Each supported OS/architecture/Torch plan has a complete exact-version
-constraint closure for its direct and transitive CPython 3.11 distributions.
-The constraints are included in the dependency-lock digest, materialized in a
-validated extension-owned cache, and injected into every pip install,
-including the local O-Voxel CPU add-on. Remote stages use explicit indexes and
-binary wheels only; the exact profile's pinned FlashAttention source build is
-the sole external sdist exception, while authenticated local native sources
-are installed with `--no-index`. Setup verifies every constrained distribution
+Each supported OS/architecture/Torch plan has two explicit exact-version
+constraint lanes. `cp311` preserves upstream Modly's original CPython 3.11
+closure; `cp312` is selected only for a validated 64-bit CPython 3.12
+fingerprint. Python version, cache tag, SOABI, ABI flags, and pointer width are
+included in the dependency-lock payload and digest. The resulting constraints
+and native build caches are therefore distinct even where both lanes currently
+pin the same package versions. The selected constraints are materialized in a
+validated extension-owned cache and injected into every pip install, including
+the local O-Voxel CPU add-on. Remote stages use explicit indexes and binary
+wheels only; the exact profile's pinned FlashAttention source build is the sole
+external sdist exception, while authenticated local native sources are
+installed with `--no-index`. Setup verifies every constrained distribution
 version, runs `pip check`, and then runs the applicable ABI/import/CUDA/render
 smokes before publishing state.
 
@@ -99,8 +103,9 @@ wheelhouse: not every third-party wheel or the external FlashAttention source
 artifact has a wrapper-controlled SHA-256. The model and source archives are
 separately size/SHA-256 pinned, and each authenticated native-source or
 portable-runtime tree has an extension-controlled complete-tree digest.
-Package-metadata validation for the eight CPython 3.11 closures is not a
-substitute for the pending real-GPU platform tests.
+The eight original CPython 3.11 requirement-set hashes remain frozen, and the
+eight CPython 3.12 plans have separate lock identities. This source-level
+validation is not a substitute for the pending real-GPU platform tests.
 
 Authenticated asset and source-tree validation rejects symlinks, hardlinks,
 and Windows reparse aliases before reuse or repair.

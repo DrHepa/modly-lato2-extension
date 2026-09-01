@@ -275,7 +275,7 @@ class PortableComponentTests(unittest.TestCase):
                 license_members = {
                     name.rsplit("/", 1)[-1]
                     for name in names
-                    if ".dist-info/licenses/" in name
+                    if ".dist-info/licenses/LICENSES/" in name
                 }
             self.assertEqual(license_members, expected_names)
             self.assertIn(f"Version: {OVOXEL_CPU_VERSION}", metadata)

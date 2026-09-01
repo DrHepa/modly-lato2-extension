@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 
 EXTENSION_ID = "modly-lato2-extension"
-EXTENSION_VERSION = "1.0.0"
+EXTENSION_VERSION = "1.1.0"
 
 LATO_REPO = "LoHhhha/LATO.2"
 LATO_SOURCE_REVISION = "fbb1f5a5755e6db8700cf6922fd506830b7cdccd"
