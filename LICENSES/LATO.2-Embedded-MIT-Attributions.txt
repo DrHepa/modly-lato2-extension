@@ -1,0 +1,22 @@
+The pinned LATO.2 source contains MIT-licensed files with copyright notices in
+addition to the repository-level LATO.2 notice. Those source headers are
+retained unchanged in the exact tree and in patched portable copies.
+
+Sparse and transformer modules:
+
+Copyright (c) Microsoft Corporation.
+Copyright (c) 2025 VAST-AI-Research and contributors.
+
+PointNet module:
+
+Copyright (c) 2020 Songyou Peng, Michael Niemeyer, Lars Mescheder, Marc Pollefeys, Andreas Geiger.
+Copyright (c) 2025 VAST-AI-Research and contributors.
+
+The PointNet source identifies these modification origins:
+
+https://github.com/autonomousvision/convolutional_occupancy_networks/blob/master/src/encoder/pointnet.py
+https://github.com/VAST-AI-Research/TripoSF/blob/main/triposf/modules/pointclouds/pointnet.py
+
+The complete MIT terms are reproduced in LATO.2-MIT.txt. The authoritative
+per-file attribution and permission notices remain at the top of the affected
+files in the pinned LATO.2 source archive.

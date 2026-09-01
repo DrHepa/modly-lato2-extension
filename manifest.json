@@ -1,0 +1,789 @@
+{
+  "id": "modly-lato2-extension",
+  "name": "LATO.2 for Modly",
+  "type": "process",
+  "version": "1.0.0",
+  "author": "DrHepa",
+  "description": "Run complete LATO.2 end-to-end, vertex-flow, vertex-autoencoder, and topology-flow inference on one mesh.",
+  "source": "https://github.com/DrHepa/modly-lato2-extension",
+  "entry": "processor.py",
+  "nodes": [
+    {
+      "id": "lato2-e2e",
+      "name": "LATO.2 End-to-End",
+      "input": "mesh",
+      "output": "mesh",
+      "params_schema": [
+        {
+          "id": "backend",
+          "label": "Runtime backend",
+          "type": "select",
+          "default": "auto",
+          "options": [
+            {
+              "value": "auto",
+              "label": "Auto (installed default)"
+            },
+            {
+              "value": "upstream",
+              "label": "Exact upstream CUDA"
+            },
+            {
+              "value": "portable",
+              "label": "Portable PyTorch"
+            }
+          ],
+          "tooltip": "Auto uses the backend selected during setup. Unavailable choices fail without fallback."
+        },
+        {
+          "id": "precision",
+          "label": "Precision",
+          "type": "select",
+          "default": "auto",
+          "options": [
+            {
+              "value": "auto",
+              "label": "Auto"
+            },
+            {
+              "value": "bfloat16",
+              "label": "BFloat16"
+            },
+            {
+              "value": "float16",
+              "label": "Float16"
+            }
+          ],
+          "tooltip": "Exact upstream inference is BF16; Float16 is available only when the portable backend declares support."
+        },
+        {
+          "id": "seed",
+          "label": "Seed",
+          "type": "int",
+          "default": 42,
+          "tooltip": "Random seed forwarded unchanged to LATO.2.",
+          "min": 0,
+          "max": 4294967295,
+          "step": 1
+        },
+        {
+          "id": "num_workers",
+          "label": "Data workers",
+          "type": "int",
+          "default": 4,
+          "tooltip": "Upstream defaults to four DataLoader workers. Set zero to disable multiprocessing on constrained Windows or headless hosts.",
+          "min": 0,
+          "max": 64,
+          "step": 1
+        },
+        {
+          "id": "inference_threshold",
+          "label": "Vertex threshold",
+          "type": "float",
+          "default": 0.5,
+          "tooltip": "V-VAE occupancy threshold.",
+          "min": 0,
+          "max": 1,
+          "step": 0.01
+        },
+        {
+          "id": "vflow_steps",
+          "label": "V-Flow steps",
+          "type": "int",
+          "default": 24,
+          "tooltip": "Euler sampling steps for vertex generation.",
+          "min": 1,
+          "max": 2147483647,
+          "step": 1
+        },
+        {
+          "id": "cfg_strength",
+          "label": "CFG strength",
+          "type": "float",
+          "default": 3,
+          "tooltip": "Classifier-free guidance strength.",
+          "step": 0.1
+        },
+        {
+          "id": "rescale_t",
+          "label": "Time rescale",
+          "type": "float",
+          "default": 1,
+          "tooltip": "V-Flow timestep rescaling factor.",
+          "step": 0.05
+        },
+        {
+          "id": "vert_num",
+          "label": "Target vertices",
+          "type": "int",
+          "default": 2000,
+          "tooltip": "Vertex-count conditioning used when input vertex count is disabled.",
+          "min": 1,
+          "max": 2147483647,
+          "step": 1
+        },
+        {
+          "id": "use_gt_vert_count",
+          "label": "Use input vertex count",
+          "type": "select",
+          "default": "false",
+          "options": [
+            {
+              "value": "true",
+              "label": "Enabled"
+            },
+            {
+              "value": "false",
+              "label": "Disabled"
+            }
+          ],
+          "tooltip": "Condition on the quantized input vertex count instead of Target vertices."
+        },
+        {
+          "id": "scaler",
+          "label": "Input-count scale",
+          "type": "float",
+          "default": 1,
+          "tooltip": "Multiplier applied to the quantized input vertex count.",
+          "step": 0.05,
+          "show_if": {
+            "use_gt_vert_count": "true"
+          }
+        },
+        {
+          "id": "min_verts",
+          "label": "Minimum conditioned vertices",
+          "type": "float",
+          "default": 200,
+          "tooltip": "Lower clamp for scaled input vertex-count conditioning.",
+          "step": 1,
+          "show_if": {
+            "use_gt_vert_count": "true"
+          }
+        },
+        {
+          "id": "max_verts",
+          "label": "Maximum conditioned vertices",
+          "type": "float",
+          "default": 5000,
+          "tooltip": "Upper clamp for scaled input vertex-count conditioning.",
+          "step": 1,
+          "show_if": {
+            "use_gt_vert_count": "true"
+          }
+        },
+        {
+          "id": "tflow_steps",
+          "label": "T-Flow steps",
+          "type": "int",
+          "default": 50,
+          "tooltip": "Euler sampling steps for topology generation.",
+          "min": 1,
+          "max": 2147483647,
+          "step": 1
+        },
+        {
+          "id": "edge_threshold",
+          "label": "Edge logit threshold",
+          "type": "float",
+          "default": 0,
+          "tooltip": "T-VAE edge-logit threshold.",
+          "step": 0.05
+        },
+        {
+          "id": "chunk_size",
+          "label": "Topology chunk size",
+          "type": "int",
+          "default": 20000,
+          "tooltip": "T-VAE decoding chunk size.",
+          "min": 1,
+          "max": 2147483647,
+          "step": 1000
+        },
+        {
+          "id": "fill_quad_rings",
+          "label": "Fill quad rings",
+          "type": "select",
+          "default": "true",
+          "options": [
+            {
+              "value": "true",
+              "label": "Enabled"
+            },
+            {
+              "value": "false",
+              "label": "Disabled"
+            }
+          ],
+          "tooltip": "Split chordless four-vertex rings into triangles."
+        },
+        {
+          "id": "render_azimuth",
+          "label": "Render azimuth",
+          "type": "float",
+          "default": 45,
+          "tooltip": "Azimuth in degrees for the DINOv2 conditioning view.",
+          "min": -360,
+          "max": 360,
+          "step": 1
+        },
+        {
+          "id": "render_elevation",
+          "label": "Render elevation",
+          "type": "float",
+          "default": 30,
+          "tooltip": "Elevation in degrees for the DINOv2 conditioning view.",
+          "min": -90,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "id": "img_res",
+          "label": "Render resolution",
+          "type": "int",
+          "default": 518,
+          "tooltip": "Square conditioning-render resolution.",
+          "min": 1,
+          "max": 4096,
+          "step": 14
+        }
+      ]
+    },
+    {
+      "id": "lato2-vflow",
+      "name": "LATO.2 V-Flow",
+      "input": "mesh",
+      "output": "mesh",
+      "params_schema": [
+        {
+          "id": "backend",
+          "label": "Runtime backend",
+          "type": "select",
+          "default": "auto",
+          "options": [
+            {
+              "value": "auto",
+              "label": "Auto (installed default)"
+            },
+            {
+              "value": "upstream",
+              "label": "Exact upstream CUDA"
+            },
+            {
+              "value": "portable",
+              "label": "Portable PyTorch"
+            }
+          ],
+          "tooltip": "Auto uses the backend selected during setup. Unavailable choices fail without fallback."
+        },
+        {
+          "id": "precision",
+          "label": "Precision",
+          "type": "select",
+          "default": "auto",
+          "options": [
+            {
+              "value": "auto",
+              "label": "Auto"
+            },
+            {
+              "value": "bfloat16",
+              "label": "BFloat16"
+            },
+            {
+              "value": "float16",
+              "label": "Float16"
+            }
+          ],
+          "tooltip": "Exact upstream inference is BF16; Float16 is available only when the portable backend declares support."
+        },
+        {
+          "id": "seed",
+          "label": "Seed",
+          "type": "int",
+          "default": 42,
+          "tooltip": "Random seed forwarded unchanged to LATO.2.",
+          "min": 0,
+          "max": 4294967295,
+          "step": 1
+        },
+        {
+          "id": "num_workers",
+          "label": "Data workers",
+          "type": "int",
+          "default": 4,
+          "tooltip": "Upstream defaults to four DataLoader workers. Set zero to disable multiprocessing on constrained Windows or headless hosts.",
+          "min": 0,
+          "max": 64,
+          "step": 1
+        },
+        {
+          "id": "pc_sample_number",
+          "label": "Point samples",
+          "type": "int",
+          "default": 819200,
+          "tooltip": "Surface/VDF point samples used by the upstream encoder.",
+          "min": 1,
+          "max": 2147483647,
+          "step": 1
+        },
+        {
+          "id": "sample_type",
+          "label": "Point sampling",
+          "type": "select",
+          "default": "dora",
+          "options": [
+            {
+              "value": "dora",
+              "label": "DORA"
+            },
+            {
+              "value": "uniform",
+              "label": "Uniform"
+            }
+          ],
+          "tooltip": "Upstream point-sampling strategy."
+        },
+        {
+          "id": "inference_threshold",
+          "label": "Vertex threshold",
+          "type": "float",
+          "default": 0.5,
+          "tooltip": "V-VAE occupancy threshold.",
+          "min": 0,
+          "max": 1,
+          "step": 0.01
+        },
+        {
+          "id": "reconstruct",
+          "label": "Also reconstruct input",
+          "type": "select",
+          "default": "false",
+          "options": [
+            {
+              "value": "true",
+              "label": "Enabled"
+            },
+            {
+              "value": "false",
+              "label": "Disabled"
+            }
+          ],
+          "tooltip": "Also run V-VAE reconstruction and preserve its PLY sidecars."
+        },
+        {
+          "id": "sample_posterior",
+          "label": "Sample posterior",
+          "type": "select",
+          "default": "true",
+          "options": [
+            {
+              "value": "true",
+              "label": "Enabled"
+            },
+            {
+              "value": "false",
+              "label": "Disabled"
+            }
+          ],
+          "tooltip": "Sample the input posterior instead of taking its mode.",
+          "show_if": {
+            "reconstruct": "true"
+          }
+        },
+        {
+          "id": "vflow_steps",
+          "label": "V-Flow steps",
+          "type": "int",
+          "default": 24,
+          "tooltip": "Euler sampling steps for vertex generation.",
+          "min": 1,
+          "max": 2147483647,
+          "step": 1
+        },
+        {
+          "id": "cfg_strength",
+          "label": "CFG strength",
+          "type": "float",
+          "default": 3,
+          "tooltip": "Classifier-free guidance strength.",
+          "step": 0.1
+        },
+        {
+          "id": "rescale_t",
+          "label": "Time rescale",
+          "type": "float",
+          "default": 1,
+          "tooltip": "V-Flow timestep rescaling factor.",
+          "step": 0.05
+        },
+        {
+          "id": "vert_num",
+          "label": "Target vertices",
+          "type": "int",
+          "default": 2000,
+          "tooltip": "Vertex-count conditioning used when input vertex count is disabled.",
+          "min": 1,
+          "max": 2147483647,
+          "step": 1
+        },
+        {
+          "id": "use_gt_vert_count",
+          "label": "Use input vertex count",
+          "type": "select",
+          "default": "false",
+          "options": [
+            {
+              "value": "true",
+              "label": "Enabled"
+            },
+            {
+              "value": "false",
+              "label": "Disabled"
+            }
+          ],
+          "tooltip": "Condition on the quantized input vertex count instead of Target vertices."
+        },
+        {
+          "id": "scaler",
+          "label": "Input-count scale",
+          "type": "float",
+          "default": 1,
+          "tooltip": "Multiplier applied to the quantized input vertex count.",
+          "step": 0.05,
+          "show_if": {
+            "use_gt_vert_count": "true"
+          }
+        },
+        {
+          "id": "min_verts",
+          "label": "Minimum conditioned vertices",
+          "type": "float",
+          "default": 200,
+          "tooltip": "Lower clamp for scaled input vertex-count conditioning.",
+          "step": 1,
+          "show_if": {
+            "use_gt_vert_count": "true"
+          }
+        },
+        {
+          "id": "max_verts",
+          "label": "Maximum conditioned vertices",
+          "type": "float",
+          "default": 5000,
+          "tooltip": "Upper clamp for scaled input vertex-count conditioning.",
+          "step": 1,
+          "show_if": {
+            "use_gt_vert_count": "true"
+          }
+        },
+        {
+          "id": "render_azimuth",
+          "label": "Render azimuth",
+          "type": "float",
+          "default": 45,
+          "tooltip": "Azimuth in degrees for the DINOv2 conditioning view.",
+          "min": -360,
+          "max": 360,
+          "step": 1
+        },
+        {
+          "id": "render_elevation",
+          "label": "Render elevation",
+          "type": "float",
+          "default": 30,
+          "tooltip": "Elevation in degrees for the DINOv2 conditioning view.",
+          "min": -90,
+          "max": 90,
+          "step": 1
+        },
+        {
+          "id": "img_res",
+          "label": "Render resolution",
+          "type": "int",
+          "default": 518,
+          "tooltip": "Square conditioning-render resolution.",
+          "min": 1,
+          "max": 4096,
+          "step": 14
+        }
+      ]
+    },
+    {
+      "id": "lato2-vvae",
+      "name": "LATO.2 V-VAE",
+      "input": "mesh",
+      "output": "mesh",
+      "params_schema": [
+        {
+          "id": "backend",
+          "label": "Runtime backend",
+          "type": "select",
+          "default": "auto",
+          "options": [
+            {
+              "value": "auto",
+              "label": "Auto (installed default)"
+            },
+            {
+              "value": "upstream",
+              "label": "Exact upstream CUDA"
+            },
+            {
+              "value": "portable",
+              "label": "Portable PyTorch"
+            }
+          ],
+          "tooltip": "Auto uses the backend selected during setup. Unavailable choices fail without fallback."
+        },
+        {
+          "id": "precision",
+          "label": "Precision",
+          "type": "select",
+          "default": "auto",
+          "options": [
+            {
+              "value": "auto",
+              "label": "Auto"
+            },
+            {
+              "value": "bfloat16",
+              "label": "BFloat16"
+            },
+            {
+              "value": "float16",
+              "label": "Float16"
+            }
+          ],
+          "tooltip": "Exact upstream inference is BF16; Float16 is available only when the portable backend declares support."
+        },
+        {
+          "id": "seed",
+          "label": "Seed",
+          "type": "int",
+          "default": 42,
+          "tooltip": "Random seed forwarded unchanged to LATO.2.",
+          "min": 0,
+          "max": 4294967295,
+          "step": 1
+        },
+        {
+          "id": "num_workers",
+          "label": "Data workers",
+          "type": "int",
+          "default": 4,
+          "tooltip": "Upstream defaults to four DataLoader workers. Set zero to disable multiprocessing on constrained Windows or headless hosts.",
+          "min": 0,
+          "max": 64,
+          "step": 1
+        },
+        {
+          "id": "pc_sample_number",
+          "label": "Point samples",
+          "type": "int",
+          "default": 819200,
+          "tooltip": "Surface/VDF point samples used by the upstream encoder.",
+          "min": 1,
+          "max": 2147483647,
+          "step": 1
+        },
+        {
+          "id": "sample_type",
+          "label": "Point sampling",
+          "type": "select",
+          "default": "dora",
+          "options": [
+            {
+              "value": "dora",
+              "label": "DORA"
+            },
+            {
+              "value": "uniform",
+              "label": "Uniform"
+            }
+          ],
+          "tooltip": "Upstream point-sampling strategy."
+        },
+        {
+          "id": "inference_threshold",
+          "label": "Vertex threshold",
+          "type": "float",
+          "default": 0.5,
+          "tooltip": "V-VAE occupancy threshold.",
+          "min": 0,
+          "max": 1,
+          "step": 0.01
+        },
+        {
+          "id": "sample_posterior",
+          "label": "Sample posterior",
+          "type": "select",
+          "default": "true",
+          "options": [
+            {
+              "value": "true",
+              "label": "Enabled"
+            },
+            {
+              "value": "false",
+              "label": "Disabled"
+            }
+          ],
+          "tooltip": "Sample the posterior instead of taking its mode."
+        }
+      ]
+    },
+    {
+      "id": "lato2-tflow",
+      "name": "LATO.2 T-Flow",
+      "input": "mesh",
+      "output": "mesh",
+      "params_schema": [
+        {
+          "id": "backend",
+          "label": "Runtime backend",
+          "type": "select",
+          "default": "auto",
+          "options": [
+            {
+              "value": "auto",
+              "label": "Auto (installed default)"
+            },
+            {
+              "value": "upstream",
+              "label": "Exact upstream CUDA"
+            },
+            {
+              "value": "portable",
+              "label": "Portable PyTorch"
+            }
+          ],
+          "tooltip": "Auto uses the backend selected during setup. Unavailable choices fail without fallback."
+        },
+        {
+          "id": "precision",
+          "label": "Precision",
+          "type": "select",
+          "default": "auto",
+          "options": [
+            {
+              "value": "auto",
+              "label": "Auto"
+            },
+            {
+              "value": "bfloat16",
+              "label": "BFloat16"
+            },
+            {
+              "value": "float16",
+              "label": "Float16"
+            }
+          ],
+          "tooltip": "Exact upstream inference is BF16; Float16 is available only when the portable backend declares support."
+        },
+        {
+          "id": "seed",
+          "label": "Seed",
+          "type": "int",
+          "default": 42,
+          "tooltip": "Random seed forwarded unchanged to LATO.2.",
+          "min": 0,
+          "max": 4294967295,
+          "step": 1
+        },
+        {
+          "id": "num_workers",
+          "label": "Data workers",
+          "type": "int",
+          "default": 4,
+          "tooltip": "Upstream defaults to four DataLoader workers. Set zero to disable multiprocessing on constrained Windows or headless hosts.",
+          "min": 0,
+          "max": 64,
+          "step": 1
+        },
+        {
+          "id": "tflow_steps",
+          "label": "T-Flow steps",
+          "type": "int",
+          "default": 50,
+          "tooltip": "Euler sampling steps for topology generation.",
+          "min": 1,
+          "max": 2147483647,
+          "step": 1
+        },
+        {
+          "id": "use_cond",
+          "label": "Use voxel conditioning",
+          "type": "select",
+          "default": "true",
+          "options": [
+            {
+              "value": "true",
+              "label": "Enabled"
+            },
+            {
+              "value": "false",
+              "label": "Disabled"
+            }
+          ],
+          "tooltip": "Condition topology flow on the active voxel field."
+        },
+        {
+          "id": "edge_threshold",
+          "label": "Edge logit threshold",
+          "type": "float",
+          "default": 0,
+          "tooltip": "T-VAE edge-logit threshold.",
+          "step": 0.05
+        },
+        {
+          "id": "chunk_size",
+          "label": "Topology chunk size",
+          "type": "int",
+          "default": 20000,
+          "tooltip": "T-VAE decoding chunk size.",
+          "min": 1,
+          "max": 2147483647,
+          "step": 1000
+        },
+        {
+          "id": "fill_quad_rings",
+          "label": "Fill quad rings",
+          "type": "select",
+          "default": "true",
+          "options": [
+            {
+              "value": "true",
+              "label": "Enabled"
+            },
+            {
+              "value": "false",
+              "label": "Disabled"
+            }
+          ],
+          "tooltip": "Split chordless four-vertex rings into triangles."
+        },
+        {
+          "id": "save_voxel_field",
+          "label": "Save voxel field",
+          "type": "select",
+          "default": "true",
+          "options": [
+            {
+              "value": "true",
+              "label": "Enabled"
+            },
+            {
+              "value": "false",
+              "label": "Disabled"
+            }
+          ],
+          "tooltip": "Preserve the active-voxel point-cloud sidecar.",
+          "show_if": {
+            "use_cond": "true"
+          }
+        }
+      ]
+    }
+  ]
+}

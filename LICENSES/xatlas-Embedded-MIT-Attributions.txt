@@ -1,0 +1,13 @@
+thekla_atlas
+https://github.com/Thekla/thekla_atlas
+MIT License
+Copyright (c) 2013 Thekla, Inc
+Copyright NVIDIA Corporation 2006 -- Ignacio Castano <icastano@nvidia.com>
+
+Fast-BVH
+https://github.com/brandonpelfrey/Fast-BVH
+MIT License
+Copyright (c) 2012 Brandon Pelfrey
+
+The complete MIT terms for the containing xatlas source are reproduced in
+xatlas-MIT.txt.

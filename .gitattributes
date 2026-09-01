@@ -1,0 +1,8 @@
+# Integrity manifests hash repository-controlled source and license payloads.
+# Keep those bytes stable across Windows and Linux checkouts.
+* text=auto eol=lf
+*.pt binary
+*.pth binary
+*.zip binary
+*.glb binary
+
