@@ -37,6 +37,16 @@ from urllib.request import Request, urlopen
 import uuid
 import zipfile
 
+from .python_abi import (
+    INTERPRETER_PROBE,
+    PythonABIError,
+    SUPPORTED_PYTHON_VERSIONS,
+    SUPPORTED_RELEASE_ABIS as _SUPPORTED_RELEASE_ABIS,
+    current_python_fingerprint,
+    normalize_python_abi,
+    python_abi_diagnostic,
+)
+
 from .ovoxel_cpu import (
     EIGEN_TREE_SHA256,
     LICENSE_SOURCE_SPECS,
@@ -65,15 +75,7 @@ COMMAND_TIMEOUT_SECONDS = 4 * 60 * 60
 SOURCE_FILE_LIMIT = 25_000
 SOURCE_UNCOMPRESSED_LIMIT = 2 * 1024 * 1024 * 1024
 PYPI_INDEX = "https://pypi.org/simple"
-SUPPORTED_PYTHON_VERSIONS = frozenset({(3, 11), (3, 12)})
-_SUPPORTED_RELEASE_ABIS = {
-    ((3, 11), "linux-x86_64", "x86_64"): "cpython-311-x86_64-linux-gnu",
-    ((3, 12), "linux-x86_64", "x86_64"): "cpython-312-x86_64-linux-gnu",
-    ((3, 11), "linux-aarch64", "aarch64"): "cpython-311-aarch64-linux-gnu",
-    ((3, 12), "linux-aarch64", "aarch64"): "cpython-312-aarch64-linux-gnu",
-    ((3, 11), "win-amd64", "amd64"): "cp311-win_amd64",
-    ((3, 12), "win-amd64", "amd64"): "cp312-win_amd64",
-}
+# Supported platform/version identities are shared with the interpreter probe.
 
 _SENSITIVE_ENV_NAME = re.compile(
     r"TOKEN|SECRET|PASSWORD|PASSWD|AUTH|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL|COOKIE",
@@ -825,65 +827,17 @@ class PythonABI:
 
 
 def _current_python_fingerprint() -> dict[str, object]:
-    return {
-        "implementation": sys.implementation.name,
-        "version": list(sys.version_info[:2]),
-        "cache_tag": sys.implementation.cache_tag,
-        "abiflags": getattr(sys, "abiflags", ""),
-        "soabi": sysconfig.get_config_var("SOABI"),
-        "platform": sysconfig.get_platform().lower(),
-        "machine": platform.machine().lower(),
-        "pointer_bits": struct.calcsize("P") * 8,
-    }
+    return current_python_fingerprint()
 
 
 def python_abi_from_fingerprint(
     fingerprint: Mapping[str, object],
 ) -> PythonABI:
-    """Validate and normalize one supported 64-bit CPython ABI fingerprint."""
-
-    raw_version = fingerprint.get("version")
-    if (
-        not isinstance(raw_version, (list, tuple))
-        or len(raw_version) != 2
-        or any(isinstance(part, bool) or not isinstance(part, int) for part in raw_version)
-    ):
-        raise DependencyError(
-            "PYTHON_ABI_UNSUPPORTED",
-            "this release supports only 64-bit CPython 3.11 and 3.12",
-        )
-    version = (raw_version[0], raw_version[1])
-    implementation = str(fingerprint.get("implementation") or "").casefold()
-    cache_tag = str(fingerprint.get("cache_tag") or "")
-    abiflags = str(fingerprint.get("abiflags") or "")
-    soabi = str(fingerprint.get("soabi") or "")
-    platform_tag = str(fingerprint.get("platform") or "").strip().casefold()
-    machine = str(fingerprint.get("machine") or "").strip().casefold()
-    pointer_bits = fingerprint.get("pointer_bits")
-    expected_tag = f"cpython-{version[0]}{version[1]}"
-    expected_soabi = _SUPPORTED_RELEASE_ABIS.get((version, platform_tag, machine))
-    if (
-        implementation != "cpython"
-        or version not in SUPPORTED_PYTHON_VERSIONS
-        or pointer_bits != 64
-        or cache_tag != expected_tag
-        or abiflags != ""
-        or soabi != expected_soabi
-    ):
-        raise DependencyError(
-            "PYTHON_ABI_UNSUPPORTED",
-            "this release supports only 64-bit CPython 3.11 and 3.12",
-        )
-    return PythonABI(
-        implementation=implementation,
-        version=version,
-        cache_tag=cache_tag,
-        abiflags=abiflags,
-        soabi=soabi,
-        platform=platform_tag,
-        machine=machine,
-        pointer_bits=pointer_bits,
-    )
+    """Validate raw evidence and preserve the canonical dependency-lock ABI."""
+    try:
+        return PythonABI(**normalize_python_abi(fingerprint))
+    except PythonABIError as exc:
+        raise DependencyError("PYTHON_ABI_UNSUPPORTED", str(exc)) from exc
 
 
 @dataclass(frozen=True)
@@ -3979,22 +3933,9 @@ portable_build_environment = cpu_build_environment
 def _assert_target_python(
     python: Path, expected: PythonABI | None = None
 ) -> PythonABI:
-    probe = (
-        "import json, struct, sys, sysconfig; "
-        "print(json.dumps({"
-        "'implementation': sys.implementation.name, "
-        "'version': list(sys.version_info[:2]), "
-        "'cache_tag': sys.implementation.cache_tag, "
-        "'abiflags': getattr(sys, 'abiflags', ''), "
-        "'soabi': sysconfig.get_config_var('SOABI'), "
-        "'platform': sysconfig.get_platform().lower(), "
-        "'machine': __import__('platform').machine().lower(), "
-        "'pointer_bits': struct.calcsize('P') * 8"
-        "}, sort_keys=True))"
-    )
     try:
         result = subprocess.run(
-            [str(python), "-I", "-S", "-c", probe],
+            [str(python), "-I", "-S", "-c", INTERPRETER_PROBE],
             check=True,
             capture_output=True,
             text=True,
@@ -4010,11 +3951,18 @@ def _assert_target_python(
         raise DependencyError(
             "PYTHON_PROBE_INVALID", "the extension virtualenv returned invalid ABI metadata"
         )
-    actual = python_abi_from_fingerprint(fingerprint)
+    try:
+        actual = python_abi_from_fingerprint(fingerprint)
+    except DependencyError as exc:
+        raise DependencyError(
+            exc.code, f"{exc.public_message}; python_exe={str(python)!r}"
+        ) from exc
     if expected is not None and actual != expected:
         raise DependencyError(
             "PYTHON_ABI_MISMATCH",
-            "the extension virtualenv Python ABI does not match the selected dependency lane",
+            "the extension virtualenv Python ABI does not match the selected dependency lane; "
+            f"python_exe={str(python)!r}; expected={expected.payload()!r}; "
+            f"detected={actual.payload()!r}",
         )
     return actual
 

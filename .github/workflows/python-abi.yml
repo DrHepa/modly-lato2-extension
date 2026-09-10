@@ -1,0 +1,78 @@
+name: Python ABI regression
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-abi-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  abi:
+    name: ${{ matrix.os }} / CPython ${{ matrix.python }} / ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: windows-2022, python: '3.11.9', arch: x64}
+          - {os: windows-2022, python: '3.12.10', arch: x64}
+          - {os: ubuntu-22.04, python: '3.11.9', arch: x64}
+          - {os: ubuntu-22.04, python: '3.12.10', arch: x64}
+          - {os: ubuntu-24.04-arm, python: '3.11', arch: arm64}
+          - {os: ubuntu-24.04-arm, python: '3.12', arch: arm64}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python }}
+          architecture: ${{ matrix.arch }}
+      - name: ABI regression and integration tests (no GPU or model downloads)
+        run: python -m unittest discover -s tests -p "test_python_abi*.py" -v
+      - name: Inspect real interpreter and temporary venv
+        run: python tools/check_python_abi.py --check-venv
+      - name: Existing offline regression suite on Linux x64
+        if: matrix.os == 'ubuntu-22.04'
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+  modly-windows-runtime:
+    name: Modly upstream PBS / Windows x64 / CPython 3.11.9
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Retrieve the exact standalone runtime pinned by Modly upstream
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'modly-python-3.11.9.tar.gz'
+          $destination = Join-Path $env:RUNNER_TEMP 'modly-python-3.11.9'
+          New-Item -ItemType Directory -Path $destination -Force | Out-Null
+          $url = 'https://github.com/indygreg/python-build-standalone/releases/download/20240726/cpython-3.11.9+20240726-x86_64-pc-windows-msvc-install_only.tar.gz'
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          Get-FileHash -Algorithm SHA256 $archive | Format-List
+          tar -xzf $archive -C $destination
+          if ($LASTEXITCODE -ne 0) { throw 'Runtime extraction failed' }
+          $python = Join-Path $destination 'python/python.exe'
+          if (!(Test-Path $python)) { throw 'Standalone Python is missing' }
+          "MODLY_ABI_PYTHON=$python" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Test the actual standalone CPython 3.11.9 and its venv
+        shell: pwsh
+        run: |
+          & $env:MODLY_ABI_PYTHON -c "import struct, sys; assert sys.version_info[:3] == (3, 11, 9); assert struct.calcsize('P') == 8"
+          if ($LASTEXITCODE -ne 0) { throw 'Unexpected standalone interpreter' }
+          & $env:MODLY_ABI_PYTHON -m unittest discover -s tests -p 'test_python_abi*.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Standalone ABI tests failed' }
+          & $env:MODLY_ABI_PYTHON tools/check_python_abi.py --check-venv
+          if ($LASTEXITCODE -ne 0) { throw 'Standalone venv ABI smoke failed' }
