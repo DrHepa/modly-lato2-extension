@@ -14,9 +14,6 @@ jobs:
     permissions:
       contents: write
       actions: read
-    env:
-      GH_TOKEN: ${{ github.token }}
-      PYTHONPATH: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -24,105 +21,15 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.11.9'
-      - name: Retrieve and authenticate only the reviewed build runs
-        shell: python
-        run: |
-          import json, os, subprocess
-          from pathlib import Path
-          assert os.environ['GITHUB_REPOSITORY'] == 'DrHepa/modly-lato2-extension'
-          assert os.environ['GITHUB_REF'] == 'refs/heads/fix/prebuilt-portable-runtime'
-          repo='DrHepa/modly-lato2-extension'
-          def api(path): return json.loads(subprocess.check_output(['gh','api',f'repos/{repo}/{path}'], text=True))
-          for run, sha, pattern, count in [
-              (34464232916,'d7592043c3db5e50fef030afb2334e69925f4239','wheel-linux-*',8),
-              (34465721218,'08af54551be69225096cde2bd8e4e25c3f0202d8','wheel-windows-*',4),
-          ]:
-              info=api(f'actions/runs/{run}')
-              assert info['head_sha']==sha and info['head_repository']['full_name']==repo
-              jobs=api(f'actions/runs/{run}/jobs?per_page=100')['jobs']
-              prefix='linux ' if count==8 else 'windows '
-              selected=[j for j in jobs if j['name'].startswith(prefix)]
-              assert len(selected)==count and all(j['conclusion']=='success' for j in selected)
-              subprocess.run(['gh','run','download',str(run),'--pattern',pattern,'--dir','collected'],check=True)
-      - name: Verify every archive, member, license and ABI record
-        shell: python
-        run: |
-          import json, shutil
-          from pathlib import Path
-          from lato2_modly import binary_wheels as binary
-          records=[]
-          out=Path('release-pack'); out.mkdir()
-          for path in sorted(Path('collected').rglob('*.whl.json')):
-              value=json.loads(path.read_text())
-              spec=binary.parse_spec(value)
-              expected='d7592043c3db5e50fef030afb2334e69925f4239' if spec.key.startswith('linux/') else '08af54551be69225096cde2bd8e4e25c3f0202d8'
-              assert spec.source_commit==expected and spec.release=='ovoxel-cpu-post2-20260910.1'
-              wheel=path.with_name(spec.filename)
-              binary.verify_wheel(wheel,spec)
-              smoke=json.loads((path.parent/'smoke.json').read_text())
-              assert smoke['key']==spec.key and smoke['consumer']['ok'] is True
-              assert smoke['consumer']['torch']==spec.key.split('/')[-1]
-              assert smoke['consumer']['voxelCount']>0
-              shutil.copyfile(wheel,out/spec.filename)
-              records.append(value)
-          expected={f'{system}/{arch}/cp{py}/{torch}' for system,arch,torches in [
-              ('win32','x64',('2.6.0+cu124','2.9.1+cu128')),
-              ('linux','x64',('2.6.0+cu124','2.9.1+cu128')),
-              ('linux','arm64',('2.6.0+cu126','2.9.1+cu128')),
-          ] for py in ('311','312') for torch in torches}
-          assert len(records)==12 and {r['key'] for r in records}==expected
-          old={s.key:s for s in binary.load_inventory()}
-          for record in records:
-              if record['key'] in old: assert binary.parse_spec(record)==old[record['key']]
-          text=json.dumps({'schema':binary.SCHEMA,'artifacts':sorted(records,key=lambda r:r['key'])},indent=2)+'\n'
-          binary.INDEX.write_text(text,encoding='utf-8')
-          (out/'binary-wheels.json').write_text(text,encoding='utf-8')
-          (out/'SHA256SUMS.txt').write_text(''.join(f"{r['sha256']}  {r['filename']}\n" for r in sorted(records,key=lambda r:r['filename'])),encoding='utf-8')
-          assert len(binary.load_inventory())==12
-      - name: Install test prerequisites
+      - name: Install offline suite prerequisites
         run: >-
           python -m pip install --only-binary=:all:
           numpy==2.2.6 pillow==12.0.0 trimesh==4.10.1
           setuptools==80.9.0 wheel==0.45.1 packaging==25.0
-      - name: Run complete available offline regression suite
-        run: python -m unittest discover -s tests -p 'test_*.py' -v
-      - name: Commit verified inventory on fix branch only
-        shell: bash
-        run: |
-          set -euo pipefail
-          git diff --check
-          test "$(git ls-remote origin refs/heads/fix/prebuilt-portable-runtime | cut -f1)" = "$GITHUB_SHA"
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- lato2_modly/binary-wheels.json
-          git commit -m 'release: pin all twelve verified portable operator wheels'
-          git push origin HEAD:refs/heads/fix/prebuilt-portable-runtime
-      - name: Upload draft pack, redownload and verify before publication
-        shell: python
-        run: |
-          import json, subprocess
-          from pathlib import Path
-          from lato2_modly import binary_wheels as binary
-          tag='ovoxel-cpu-post2-20260910.1'
-          existing=json.loads(subprocess.check_output(['gh','api','repos/DrHepa/modly-lato2-extension/releases?per_page=100'],text=True))
-          assert not any(r['tag_name']==tag for r in existing), 'Refusing to overwrite an existing binary release'
-          commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
-          notes=('Verified portable CPU operator wheels for Windows x64, Linux x64 and Linux ARM64, CPython 3.11/3.12, and the exact PyTorch builds in binary-wheels.json. '
-                 'These are auxiliary runtime binaries, not model weights or a new Modly application release. '
-                 'All twelve were built from pinned TRELLIS.2/Eigen sources and executed in separate consumer venvs with compiler PATH removed. '
-                 'Compiler-free production installer validation is separate; no GPU inference or clean Windows OS validation is claimed. '
-                 'Source/build provenance, file hashes and licenses are recorded in the inventory and repository build tools. '
-                 'Linux wheels use a glibc 2.28 build environment and retain linux platform tags; no auditwheel certification is claimed. '
-                 'Use the extension installer rather than selecting a wheel manually. Extension integration is on fix/prebuilt-portable-runtime pending PR review.')
-          subprocess.run(['gh','release','create',tag,'--target',commit,'--draft','--prerelease','--title','Portable o-voxel CPU binary pack — CPython 3.11/3.12','--notes',notes],check=True)
-          paths=sorted(str(p) for p in Path('release-pack').iterdir())
-          subprocess.run(['gh','release','upload',tag,*paths],check=True)
-          subprocess.run(['gh','release','download',tag,'--dir','redownloaded'],check=True)
-          for spec in binary.load_inventory(): binary.verify_wheel(Path('redownloaded')/spec.filename,spec)
-          assert (Path('redownloaded')/'binary-wheels.json').read_bytes()==binary.INDEX.read_bytes()
-          subprocess.run(['gh','release','edit',tag,'--draft=false','--latest=false'],check=True)
-      - name: Save evidence and completed source
-        run: git archive --format=zip --output=release-pack/extension-source.zip HEAD
+      - name: Verify builds, test complete available suite and publish pack
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/finish-binary-release.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: verified-complete-binary-pack
