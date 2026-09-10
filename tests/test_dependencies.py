@@ -1940,6 +1940,11 @@ class InstallPlanTests(unittest.TestCase):
                 result = mock.Mock()
                 result.stdout = ""
                 return result
+            if "MODLY_LATO2_BINARY_SPEC" in kwargs["env"]:
+                spec = json.loads(kwargs["env"]["MODLY_LATO2_BINARY_SPEC"])
+                result = mock.Mock()
+                result.stdout = json.dumps({"wheelSha256": spec["sha256"], "filesVerified": len(spec["files"])})
+                return result
             return completed
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -1947,21 +1952,24 @@ class InstallPlanTests(unittest.TestCase):
             python = fake_venv_python(root, symlink=True)
             base_python = python.resolve(strict=True)
             with mock.patch.object(
-                deps, "cpu_build_environment", return_value={"PATH": ""}
+                deps, "cpu_build_environment", side_effect=AssertionError("compiler requested")
             ), mock.patch.object(deps.subprocess, "run", side_effect=fake_run):
                 result = deps.verify_portable_cpu_extension(
                     python, plan, root / "cache"
                 )
         self.assertEqual(result["voxelCount"], 12)
-        self.assertEqual([command[0] for command in calls], [str(python), str(python)])
+        self.assertEqual([command[0] for command in calls], [str(python)] * 3)
         self.assertNotIn(str(base_python), [command[0] for command in calls])
-        smoke_script = calls[1][-1]
+        self.assertIn("MODLY_LATO2_BINARY_SPEC", environments[0])
+        self.assertIn("hashlib.file_digest", calls[0][-1])
+        self.assertEqual(calls[1][-1], "check")
+        smoke_script = calls[2][-1]
         self.assertIn("mesh_to_flexible_dual_grid_cpu", smoke_script)
         self.assertIn("torch.isfinite", smoke_script)
         self.assertIn('metadata.get_all("License-File")', smoke_script)
         self.assertIn("hashlib.sha256", smoke_script)
         smoke_identity = json.loads(
-            environments[1]["MODLY_LATO2_OVOXEL_CPU_IDENTITY"]
+            environments[2]["MODLY_LATO2_OVOXEL_CPU_IDENTITY"]
         )
         self.assertEqual(smoke_identity["version"], deps.OVOXEL_CPU_VERSION)
         self.assertEqual(

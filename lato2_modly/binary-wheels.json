@@ -224,6 +224,106 @@
         2,
         28
       ]
+    },
+    {
+      "key": "win32/x64/cp311/2.6.0+cu124",
+      "filename": "modly_lato2_ovoxel_cpu-0.0.1.post2-1torch260cu124-cp311-cp311-win_amd64.whl",
+      "release": "ovoxel-cpu-post2-20260910.1",
+      "sha256": "9567ec25087e7daeac57c57545ee2ea118adce3b8a44cec7b8b4959e7eb31c08",
+      "size": 132751,
+      "build_identity": "e6f60e361e856cb5b6998e590a3908f61c0c391c14979a9168ff56e6e93415d6",
+      "template_sha256": "930378bb300fde0e8e99d68750e3e2ba1937995901c7e1634a7ba59deb928691",
+      "source_commit": "08af54551be69225096cde2bd8e4e25c3f0202d8",
+      "files": {
+        "lato2_ovoxel_cpu/_C.cp311-win_amd64.pyd": "c85ef76b330b26840dd463f6e451478e642dfd258500c101ec468f3c94dbfa22",
+        "lato2_ovoxel_cpu/__init__.py": "41fab2bfe4ce49d653172cbc26e9eef4eab1e7f336ac1e8873cee6bcb7c101ea",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-Apache-2.0-notice.txt": "8fae83faf0810de83f32636b2c97aaddaf7ae95008456e1e7f87cc6748214e95",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-BSD-notice.txt": "51928dce36213c5333ba3172e847d735d4c6e9b7ff2722a326c49067155b82eb",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-COPYING-README.txt": "72fe0574781a5838d62b9abc804991489e52ad590e03514c79cdc65b4ed68403",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-MINPACK-notice.txt": "c87b7f8ee88f6195e91743820c00354833583aef091b72e2d4a49c8e28e798a0",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-MPL-2.0.txt": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Modly-LATO2-Wrapper-MIT.txt": "2e55c53ff294650e049d844f2544fec947c3516440aeffca4b2334cf94b13eeb",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/TRELLIS.2-MIT.txt": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/METADATA": "5d757f8364af844c12cf4d0ae4ea12eef5aa5ce798882a03eaaa3ba5bcfc0fe6",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/WHEEL": "2a906a6d2e25e0062a861c3cd62718f8803f0c0bfb99747a766ff6986a9f631b",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/top_level.txt": "c8e6c678ba4f9a5f21ee050f6b459008ebd0eb17f474f404408e22c0add611ba"
+      },
+      "glibc_min": null
+    },
+    {
+      "key": "win32/x64/cp311/2.9.1+cu128",
+      "filename": "modly_lato2_ovoxel_cpu-0.0.1.post2-1torch291cu128-cp311-cp311-win_amd64.whl",
+      "release": "ovoxel-cpu-post2-20260910.1",
+      "sha256": "4d746733a5b67863d9b74ed15de76d33090b5bb25e5d44ea1c0bc4387d264180",
+      "size": 139188,
+      "build_identity": "e6f60e361e856cb5b6998e590a3908f61c0c391c14979a9168ff56e6e93415d6",
+      "template_sha256": "930378bb300fde0e8e99d68750e3e2ba1937995901c7e1634a7ba59deb928691",
+      "source_commit": "08af54551be69225096cde2bd8e4e25c3f0202d8",
+      "files": {
+        "lato2_ovoxel_cpu/_C.cp311-win_amd64.pyd": "c836b6f5891311f73c2f354d36be4f9e4d5280b460abdd72bbe0ec2135268707",
+        "lato2_ovoxel_cpu/__init__.py": "41fab2bfe4ce49d653172cbc26e9eef4eab1e7f336ac1e8873cee6bcb7c101ea",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-Apache-2.0-notice.txt": "8fae83faf0810de83f32636b2c97aaddaf7ae95008456e1e7f87cc6748214e95",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-BSD-notice.txt": "51928dce36213c5333ba3172e847d735d4c6e9b7ff2722a326c49067155b82eb",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-COPYING-README.txt": "72fe0574781a5838d62b9abc804991489e52ad590e03514c79cdc65b4ed68403",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-MINPACK-notice.txt": "c87b7f8ee88f6195e91743820c00354833583aef091b72e2d4a49c8e28e798a0",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-MPL-2.0.txt": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Modly-LATO2-Wrapper-MIT.txt": "2e55c53ff294650e049d844f2544fec947c3516440aeffca4b2334cf94b13eeb",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/TRELLIS.2-MIT.txt": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/METADATA": "5d757f8364af844c12cf4d0ae4ea12eef5aa5ce798882a03eaaa3ba5bcfc0fe6",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/WHEEL": "bd55f0ab4c99baec7d26940ba95ef955f75f0e01c528dfaea0b0a6ede736263f",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/top_level.txt": "c8e6c678ba4f9a5f21ee050f6b459008ebd0eb17f474f404408e22c0add611ba"
+      },
+      "glibc_min": null
+    },
+    {
+      "key": "win32/x64/cp312/2.6.0+cu124",
+      "filename": "modly_lato2_ovoxel_cpu-0.0.1.post2-1torch260cu124-cp312-cp312-win_amd64.whl",
+      "release": "ovoxel-cpu-post2-20260910.1",
+      "sha256": "5852053e480fab8ef644d8d3450fc0c89db9c69cefbca2bd4f56aa074ec2c3a7",
+      "size": 133327,
+      "build_identity": "e6f60e361e856cb5b6998e590a3908f61c0c391c14979a9168ff56e6e93415d6",
+      "template_sha256": "930378bb300fde0e8e99d68750e3e2ba1937995901c7e1634a7ba59deb928691",
+      "source_commit": "08af54551be69225096cde2bd8e4e25c3f0202d8",
+      "files": {
+        "lato2_ovoxel_cpu/_C.cp312-win_amd64.pyd": "cfcde6699c1ff903035adc1287c1ee7b8b444e92844aa91a4495fa9ecdc7ea05",
+        "lato2_ovoxel_cpu/__init__.py": "41fab2bfe4ce49d653172cbc26e9eef4eab1e7f336ac1e8873cee6bcb7c101ea",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-Apache-2.0-notice.txt": "8fae83faf0810de83f32636b2c97aaddaf7ae95008456e1e7f87cc6748214e95",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-BSD-notice.txt": "51928dce36213c5333ba3172e847d735d4c6e9b7ff2722a326c49067155b82eb",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-COPYING-README.txt": "72fe0574781a5838d62b9abc804991489e52ad590e03514c79cdc65b4ed68403",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-MINPACK-notice.txt": "c87b7f8ee88f6195e91743820c00354833583aef091b72e2d4a49c8e28e798a0",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-MPL-2.0.txt": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Modly-LATO2-Wrapper-MIT.txt": "2e55c53ff294650e049d844f2544fec947c3516440aeffca4b2334cf94b13eeb",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/TRELLIS.2-MIT.txt": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/METADATA": "5d757f8364af844c12cf4d0ae4ea12eef5aa5ce798882a03eaaa3ba5bcfc0fe6",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/WHEEL": "7a5d1e44a803458b1e36da67cfd5c88ab21fd811b8dc9a0355fa254d54d6373b",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/top_level.txt": "c8e6c678ba4f9a5f21ee050f6b459008ebd0eb17f474f404408e22c0add611ba"
+      },
+      "glibc_min": null
+    },
+    {
+      "key": "win32/x64/cp312/2.9.1+cu128",
+      "filename": "modly_lato2_ovoxel_cpu-0.0.1.post2-1torch291cu128-cp312-cp312-win_amd64.whl",
+      "release": "ovoxel-cpu-post2-20260910.1",
+      "sha256": "4b6c15a7bce5ed384316ab5b04a8713aeb6c2b70059b14dfb395feffca9131cb",
+      "size": 140045,
+      "build_identity": "e6f60e361e856cb5b6998e590a3908f61c0c391c14979a9168ff56e6e93415d6",
+      "template_sha256": "930378bb300fde0e8e99d68750e3e2ba1937995901c7e1634a7ba59deb928691",
+      "source_commit": "08af54551be69225096cde2bd8e4e25c3f0202d8",
+      "files": {
+        "lato2_ovoxel_cpu/_C.cp312-win_amd64.pyd": "51551deae36867e6fa18a8db03b8af8b391cfcee0c8e7c66574c408b941726dd",
+        "lato2_ovoxel_cpu/__init__.py": "41fab2bfe4ce49d653172cbc26e9eef4eab1e7f336ac1e8873cee6bcb7c101ea",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-Apache-2.0-notice.txt": "8fae83faf0810de83f32636b2c97aaddaf7ae95008456e1e7f87cc6748214e95",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-BSD-notice.txt": "51928dce36213c5333ba3172e847d735d4c6e9b7ff2722a326c49067155b82eb",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-COPYING-README.txt": "72fe0574781a5838d62b9abc804991489e52ad590e03514c79cdc65b4ed68403",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-MINPACK-notice.txt": "c87b7f8ee88f6195e91743820c00354833583aef091b72e2d4a49c8e28e798a0",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Eigen-MPL-2.0.txt": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/Modly-LATO2-Wrapper-MIT.txt": "2e55c53ff294650e049d844f2544fec947c3516440aeffca4b2334cf94b13eeb",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/licenses/LICENSES/TRELLIS.2-MIT.txt": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/METADATA": "5d757f8364af844c12cf4d0ae4ea12eef5aa5ce798882a03eaaa3ba5bcfc0fe6",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/WHEEL": "c1d4aaf433a498490425bfd4919654f42ab797124b991858ce9f22a4e63a29a4",
+        "modly_lato2_ovoxel_cpu-0.0.1.post2.dist-info/top_level.txt": "c8e6c678ba4f9a5f21ee050f6b459008ebd0eb17f474f404408e22c0add611ba"
+      },
+      "glibc_min": null
     }
   ]
 }
