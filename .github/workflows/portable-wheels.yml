@@ -1,0 +1,78 @@
+name: Build portable operator wheels
+on:
+  push:
+    branches: [fix/prebuilt-portable-runtime]
+    paths: [tools/build_portable_wheel.py, .github/workflows/portable-wheels.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11.9', '3.12.10']
+        torch: ['2.6.0+cu124', '2.9.1+cu128']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with: {persist-credentials: false}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with: {python-version: '${{ matrix.python }}', architecture: x64}
+      - name: Build and test wheel in separate consumer venv
+        shell: python
+        env:
+          TORCH_BUILD: ${{ matrix.torch }}
+        run: |
+          import os, pathlib, subprocess, sys
+          envdir = pathlib.Path('.wheel-builder').resolve()
+          subprocess.run([sys.executable, '-m', 'venv', str(envdir)], check=True)
+          p = str(envdir / 'Scripts/python.exe')
+          def run(*args): subprocess.run([p, *args], check=True)
+          run('-m', 'pip', 'install', '--only-binary=:all:', 'numpy==2.2.6', 'setuptools==80.9.0', 'wheel==0.45.1', 'packaging==25.0', 'ninja==1.13.0')
+          run('-m', 'pip', 'install', '--only-binary=:all:', 'torch==' + os.environ['TORCH_BUILD'], '--index-url', 'https://download.pytorch.org/whl/' + os.environ['TORCH_BUILD'].split('+')[1])
+          run('tools/build_portable_wheel.py', '--torch', os.environ['TORCH_BUILD'], '--release', 'ovoxel-cpu-post2-20260910.1')
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: wheel-windows-${{ matrix.python }}-${{ matrix.torch }}
+          path: wheel-output/
+          if-no-files-found: error
+          retention-days: 7
+  linux:
+    runs-on: ${{ matrix.os }}
+    container:
+      image: quay.io/pypa/manylinux_2_28_${{ matrix.arch }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-22.04, arch: x86_64, torch: '2.6.0+cu124', python: '311'}
+          - {os: ubuntu-22.04, arch: x86_64, torch: '2.6.0+cu124', python: '312'}
+          - {os: ubuntu-22.04, arch: x86_64, torch: '2.9.1+cu128', python: '311'}
+          - {os: ubuntu-22.04, arch: x86_64, torch: '2.9.1+cu128', python: '312'}
+          - {os: ubuntu-24.04-arm, arch: aarch64, torch: '2.6.0+cu126', python: '311'}
+          - {os: ubuntu-24.04-arm, arch: aarch64, torch: '2.6.0+cu126', python: '312'}
+          - {os: ubuntu-24.04-arm, arch: aarch64, torch: '2.9.1+cu128', python: '311'}
+          - {os: ubuntu-24.04-arm, arch: aarch64, torch: '2.9.1+cu128', python: '312'}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with: {persist-credentials: false}
+      - name: Build on glibc 2.28 and test binary consumer
+        shell: bash
+        env:
+          PY_ABI: ${{ matrix.python }}
+          TORCH_BUILD: ${{ matrix.torch }}
+        run: |
+          set -euo pipefail
+          /opt/python/cp${PY_ABI}-cp${PY_ABI}/bin/python -m venv .wheel-builder
+          .wheel-builder/bin/python -m pip install --only-binary=:all: numpy==2.2.6 setuptools==80.9.0 wheel==0.45.1 packaging==25.0 ninja==1.13.0
+          .wheel-builder/bin/python -m pip install --only-binary=:all: "torch==$TORCH_BUILD" --index-url "https://download.pytorch.org/whl/${TORCH_BUILD#*+}"
+          .wheel-builder/bin/python tools/build_portable_wheel.py --torch "$TORCH_BUILD" --release ovoxel-cpu-post2-20260910.1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: wheel-linux-${{ matrix.arch }}-${{ matrix.python }}-${{ matrix.torch }}
+          path: wheel-output/
+          if-no-files-found: error
+          retention-days: 7
