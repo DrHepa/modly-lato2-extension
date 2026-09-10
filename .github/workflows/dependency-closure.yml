@@ -1,0 +1,78 @@
+name: Complete portable dependency imports
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: dependency-closure-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  closure:
+    name: ${{ matrix.os }} / ${{ matrix.python }} / ${{ matrix.torch }} / ${{ matrix.runtime }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: windows-2022, python: '3.11.9', arch: x64, torch: '2.6.0+cu124', runtime: standard}
+          - {os: windows-2022, python: '3.12.10', arch: x64, torch: '2.6.0+cu124', runtime: standard}
+          - {os: windows-2022, python: '3.11.9', arch: x64, torch: '2.9.1+cu128', runtime: standard}
+          - {os: windows-2022, python: '3.12.10', arch: x64, torch: '2.9.1+cu128', runtime: standard}
+          - {os: windows-2022, python: '3.11.9', arch: x64, torch: '2.6.0+cu124', runtime: modly-pbs}
+          - {os: ubuntu-22.04, python: '3.11.9', arch: x64, torch: '2.6.0+cu124', runtime: standard}
+          - {os: ubuntu-24.04-arm, python: '3.12', arch: arm64, torch: '2.9.1+cu128', runtime: standard}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python }}
+          architecture: ${{ matrix.arch }}
+      - name: Install marker regression prerequisite in CI host
+        run: >-
+          python -m pip install --only-binary=:all: packaging==25.0
+      - name: Marker and failure diagnostic regressions
+        run: python -m unittest discover -s tests -p test_dependency_probe.py -v
+      - name: Retrieve Modly upstream standalone Python
+        if: matrix.runtime == 'modly-pbs'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'modly-python.tar.gz'
+          $destination = Join-Path $env:RUNNER_TEMP 'modly-python'
+          New-Item -ItemType Directory -Path $destination -Force | Out-Null
+          Invoke-WebRequest -Uri 'https://github.com/indygreg/python-build-standalone/releases/download/20240726/cpython-3.11.9+20240726-x86_64-pc-windows-msvc-install_only.tar.gz' -OutFile $archive
+          tar -xzf $archive -C $destination
+          if ($LASTEXITCODE -ne 0) { throw 'Extraction failed' }
+          "MODLY_CLOSURE_PYTHON=$destination/python/python.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Real complete dependency install and imports, without GPU execution
+        shell: python
+        env:
+          TORCH_BUILD: ${{ matrix.torch }}
+        run: |
+          import os, pathlib, subprocess, sys
+          base = os.environ.get('MODLY_CLOSURE_PYTHON', sys.executable)
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'dependency-closure'
+          venv = root / 'venv.__modly_staging'
+          subprocess.run([base, '-m', 'venv', str(venv)], check=True)
+          python = str(venv / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python'))
+          output = pathlib.Path('closure-evidence'); output.mkdir(exist_ok=True)
+          with (output/'install.log').open('w', encoding='utf-8') as log:
+              result = subprocess.run([python, '-X', 'utf8', 'tools/check_dependency_closure.py', '--torch', os.environ['TORCH_BUILD'], '--report', str(output/'result.json')], stdout=log, stderr=subprocess.STDOUT, timeout=1200)
+          if (output/'result.json').exists():
+              print((output/'result.json').read_text(encoding='utf-8'))
+          if result.returncode:
+              print((output/'install.log').read_text(encoding='utf-8', errors='replace')[-10000:])
+              raise SystemExit(result.returncode)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: closure-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.torch }}-${{ matrix.runtime }}
+          path: closure-evidence/
+          retention-days: 7
+          if-no-files-found: ignore
