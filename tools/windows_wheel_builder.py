@@ -10,12 +10,17 @@ if __name__ == '__main__':
     vcvars = Path(result.stdout.strip()) / 'VC/Auxiliary/Build/vcvars64.bat'
     if not vcvars.is_file():
         raise RuntimeError('The CI image lacks the reviewed MSVC v143 toolchain')
-    result = subprocess.run(['cmd.exe', '/d', '/s', '/c', f'call "{vcvars}" >nul && set'], check=True, capture_output=True, text=True)
-    # os.environ is case-insensitive on Windows; ordinary dicts are not.
-    # Export only build-tool settings, never credentials or arbitrary variables.
+    # cmd.exe uses different quoting from the MS C-runtime argument parser.
+    # Passing a list would escape embedded quotes as backslash-quote, which
+    # cmd interprets literally. Supply its trusted command line unchanged.
+    cmd = os.environ.get('COMSPEC', r'C:\Windows\System32\cmd.exe')
+    result = subprocess.run(f'"{cmd}" /d /s /c "call "{vcvars}" >nul && set"', capture_output=True, text=True, timeout=120)
+    if result.returncode:
+        raise RuntimeError('MSVC activation failed: ' + result.stderr)
     allowed = {'PATH','INCLUDE','LIB','LIBPATH','WINDOWSSDKDIR','VCINSTALLDIR','VSINSTALLDIR','VCTOOLSINSTALLDIR'}
     for line in result.stdout.splitlines():
         key, sep, value = line.partition('=')
         if sep and key.upper() in allowed:
             os.environ[key.upper()] = value
+    os.environ['DISTUTILS_USE_SDK'] = '1'
     main()
