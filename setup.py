@@ -75,24 +75,8 @@ PORTABLE_BUILD_CACHE_FREE_BYTES = 8 * GIB
 EXACT_BUILD_CACHE_FREE_BYTES = 12 * GIB
 WINDOWS_REPARSE_ATTRIBUTE = 0x400
 
-INTERPRETER_PROBE = r"""
-import json
-import platform
-import struct
-import sys
-import sysconfig
-
-print(json.dumps({
-    "implementation": sys.implementation.name,
-    "version": list(sys.version_info[:2]),
-    "cache_tag": sys.implementation.cache_tag,
-    "abiflags": getattr(sys, "abiflags", ""),
-    "soabi": sysconfig.get_config_var("SOABI"),
-    "platform": sysconfig.get_platform().lower(),
-    "machine": platform.machine().lower(),
-    "pointer_bits": struct.calcsize("P") * 8,
-}, sort_keys=True))
-"""
+# Shared with dependency verification, including Windows EXT_SUFFIX evidence.
+INTERPRETER_PROBE = deps.INTERPRETER_PROBE
 
 
 class SetupFailure(RuntimeError):
@@ -455,11 +439,15 @@ def validate_context(payload: Mapping[str, object], root: Path = ROOT) -> SetupC
     accelerator = str(
         payload.get("accelerator") or ("cuda" if gpu_sm > 0 else "cpu")
     ).strip().casefold()
+    log(f"Inspecting Modly Python: {str(python_exe)!r}")
     host_fingerprint = interpreter_fingerprint(python_exe)
+    log("Python ABI metadata: " + deps.python_abi_diagnostic(host_fingerprint))
     try:
         deps.python_abi_from_fingerprint(host_fingerprint)
     except deps.DependencyError as exc:
-        raise SetupFailure(exc.code, exc.public_message) from exc
+        raise SetupFailure(
+            exc.code, f"{exc.public_message}; python_exe={str(python_exe)!r}"
+        ) from exc
 
     normalized = dict(payload)
     normalized.update(
