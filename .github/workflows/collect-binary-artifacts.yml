@@ -1,0 +1,29 @@
+name: Collect binary artifacts
+on:
+  push:
+    branches: [fix/prebuilt-portable-runtime]
+    paths: [.github/workflows/collect-binary-artifacts.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  collect:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with: {persist-credentials: false}
+      - name: Download only reviewed Linux build outputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/DrHepa/modly-lato2-extension/actions/runs/34464232916 --jq .head_sha)" = d7592043c3db5e50fef030afb2334e69925f4239
+          gh run download 34464232916 --pattern 'wheel-linux-*' --dir collected
+          git archive --format=zip --output=collected/source-current.zip HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: verified-linux-collection
+          path: collected/
+          if-no-files-found: error
+          retention-days: 7
