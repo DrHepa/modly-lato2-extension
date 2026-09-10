@@ -1,0 +1,53 @@
+name: Apply binary installer transition (temporary)
+on:
+  push:
+    branches: [fix/prebuilt-portable-runtime]
+    paths: [.github/workflows/apply-binary-transition.yml]
+permissions:
+  contents: read
+jobs:
+  apply:
+    if: github.repository == 'DrHepa/modly-lato2-extension'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11.9'
+      - name: Authenticate and apply exact reviewed patch
+        shell: python
+        run: |
+          import base64, hashlib, lzma, os, subprocess
+          from pathlib import Path
+          assert os.environ['GITHUB_REPOSITORY'] == 'DrHepa/modly-lato2-extension'
+          assert os.environ['GITHUB_REF'] == 'refs/heads/fix/prebuilt-portable-runtime'
+          text = ''.join(''.join(Path(f'.github/binary-transition-{i}.txt').read_text().split()) for i in range(2))
+          assert len(text) == 25560, len(text)
+          packed = base64.b64decode(text, validate=True)
+          digest = hashlib.sha256(packed).hexdigest()
+          assert digest == '94ba112c1736c61065c3a09e4d43f4507badb80b70fc22187126b9d2eb744716', digest
+          patch = lzma.decompress(packed)
+          assert len(patch) == 82988
+          subprocess.run(['git', 'apply', '--check', '-'], input=patch, check=True)
+          subprocess.run(['git', 'apply', '-'], input=patch, check=True)
+      - name: Test binary provisioning and transactional setup
+        run: |
+          python -m unittest discover -s tests -p 'test_binary_wheels.py' -v
+          python -m unittest discover -s tests -p 'test_setup.py' -v
+          python -m unittest discover -s tests -p 'test_python_abi*.py' -v
+      - name: Publish only reviewed files to isolated fix branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          test "$(git ls-remote origin refs/heads/fix/prebuilt-portable-runtime | cut -f1)" = "$GITHUB_SHA"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- .gitignore BINARY_DISTRIBUTION.md PORTABLE_BACKEND.md README.md lato2_modly/binary-wheels.json lato2_modly/binary_wheels.py lato2_modly/constants.py lato2_modly/dependencies.py manifest.json setup.py tests/test_binary_wheels.py tests/test_dependencies.py tests/test_setup.py tools/check_binary_install.py
+          git commit -m 'feat(setup): provision authenticated portable wheels without a compiler'
+          git push origin HEAD:refs/heads/fix/prebuilt-portable-runtime
