@@ -48,6 +48,7 @@ from .python_abi import (
 )
 
 from . import binary_wheels as binaries
+from .dependency_probe import CONDITIONAL_DISTRIBUTION_MARKERS, IMPORT_PROBE, failure_detail
 
 from .ovoxel_cpu import (
     EIGEN_TREE_SHA256,
@@ -2642,6 +2643,7 @@ def dependency_lock_payload(plan: DependencyPlan) -> dict[str, object]:
         "bootstrap": list(python_lane.bootstrap),
         "base": list(python_lane.base),
         "constraints": list(constraint_requirements(plan)),
+        "conditionalDistributionMarkers": dict(CONDITIONAL_DISTRIBUTION_MARKERS),
         "platform": list(python_lane.x64_render if plan.arch == "x64" else ()),
         # Both profiles expose the compatibility backend.  Exact additionally
         # exposes the full native upstream backend, but still installs this
@@ -4415,14 +4417,14 @@ print(json.dumps({
     return payload
 
 
-def verify_dependencies(
+def _dependency_probe_environment(
     python: Path,
     plan: DependencyPlan,
     cache_root: Path,
     *,
     env: Mapping[str, str] | None = None,
-) -> dict[str, object]:
-    """Run import, version, native-symbol and CUDA smoke checks in the venv."""
+) -> dict[str, str]:
+    """Prepare the same target, marker policy and environment for every probe."""
 
     smoke_env = sanitize_subprocess_environment(
         os.environ if env is None else env
@@ -4446,45 +4448,68 @@ def verify_dependencies(
     python = _validated_venv_python_path(Path(python))
     _verify_cusparselt_metadata(python, plan)
     expected = expected_distribution_versions(plan)
-    script = r'''
-import importlib
-import importlib.metadata
-import json
-import os
+    smoke_env["MODLY_LATO2_EXPECTED_DISTS"] = json.dumps(expected, sort_keys=True)
+    smoke_env["MODLY_LATO2_NATIVE_SMOKE"] = "1" if plan.install_native_stack else "0"
+    smoke_env["MODLY_LATO2_OPEN3D_SMOKE"] = "1" if plan.arch == "x64" else "0"
+    smoke_env["MODLY_LATO2_OPEN3D_RENDER_SMOKE"] = (
+        "1" if plan.install_native_stack else "0"
+    )
+    smoke_env["MODLY_LATO2_ATTN_BACKEND"] = plan.attention_backend
+    smoke_env["MODLY_LATO2_CONDITIONAL_DISTS"] = json.dumps(CONDITIONAL_DISTRIBUTION_MARKERS)
+    return smoke_env
 
-expected = json.loads(os.environ["MODLY_LATO2_EXPECTED_DISTS"])
-for name, wanted in expected.items():
-    actual = importlib.metadata.version(name)
-    if actual != wanted:
-        raise RuntimeError(f"{name} version {actual!r} != {wanted!r}")
 
-import numpy
-import trimesh
-import tqdm
-import PIL
-import ninja
-import psutil
-import cv2
-import huggingface_hub
-import plyfile
-import zstandard
-import easydict
-import einops
-import filelock
-import torch
-import torchvision
+def _run_dependency_probe(python: Path, script: str, smoke_env: Mapping[str, str]) -> dict[str, object]:
+    try:
+        completed = subprocess.run(
+            [str(python), "-I", "-X", "utf8", "-c", script],
+            check=True, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
+            timeout=20 * 60, env=dict(smoke_env),
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        detail = failure_detail(exc, paths={str(python.parent.parent): "<extension-venv>",
+                                           smoke_env.get("MODLY_LATO2_CACHE_DIR", ""): "<runtime-cache>"})
+        raise DependencyError("DEPENDENCY_SMOKE_FAILED", "dependency smoke failed; " + detail) from exc
+    try:
+        payload = json.loads(completed.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError) as exc:
+        evidence = subprocess.CalledProcessError(0, "dependency-probe", output=completed.stdout, stderr=completed.stderr)
+        raise DependencyError("DEPENDENCY_SMOKE_FAILED", "dependency smoke returned invalid JSON; " + failure_detail(evidence)) from exc
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        raise DependencyError("DEPENDENCY_SMOKE_INVALID", "dependency smoke result is invalid")
+    return payload
 
-if os.environ.get("MODLY_LATO2_OPEN3D_SMOKE") == "1":
-    import open3d
-    if os.environ.get("MODLY_LATO2_OPEN3D_RENDER_SMOKE") == "1":
-        renderer = open3d.visualization.rendering.OffscreenRenderer(16, 16)
-        rendered = numpy.asarray(renderer.render_to_image())
-        if rendered.ndim != 3 or rendered.shape[:2] != (16, 16):
-            raise RuntimeError("Open3D OffscreenRenderer returned an invalid image")
-        del renderer
 
+def verify_dependency_imports(
+    python: Path, plan: DependencyPlan, cache_root: Path, *,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """Diagnostic/CI phase only. Does NOT replace production CUDA validation."""
+    python = _validated_venv_python_path(Path(python))
+    smoke_env = _dependency_probe_environment(python, plan, cache_root, env=env)
+    # Renderer context creation belongs to GPU/native acceptance, not imports.
+    smoke_env["MODLY_LATO2_OPEN3D_RENDER_SMOKE"] = "0"
+    script = IMPORT_PROBE + "\nprint(json.dumps({'ok': True, 'scope': 'metadata-and-imports-only', 'cuda_tested': False, 'conditional_absent': conditional_absent}))\n"
+    return _run_dependency_probe(python, script, smoke_env)
+
+
+def verify_dependencies(
+    python: Path,
+    plan: DependencyPlan,
+    cache_root: Path,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """Run import, version, native-symbol and CUDA smoke checks in the venv."""
+
+    python = _validated_venv_python_path(Path(python))
+    smoke_env = _dependency_probe_environment(python, plan, cache_root, env=env)
+    script = IMPORT_PROBE + r'''
+_stage("cuda:availability")
 if not torch.cuda.is_available():
     raise RuntimeError("PyTorch cannot access the CUDA GPU")
+_stage("cuda:matmul")
 device = torch.device("cuda")
 x = torch.ones((16, 16), device=device)
 y = x @ x
@@ -4495,6 +4520,7 @@ torch.cuda.synchronize()
 native = os.environ.get("MODLY_LATO2_NATIVE_SMOKE") == "1"
 attention = os.environ.get("MODLY_LATO2_ATTN_BACKEND", "sdpa")
 if native:
+    _stage("native:imports")
     import spconv.pytorch as spconv
     import torch_scatter
     import xformers.ops as xops
@@ -4522,6 +4548,7 @@ if native:
     # Exercise the actual CUDA kernels and ABIs used by LATO.2/DINOv2. Imports
     # alone can succeed for a wheel built against an incompatible torch/CUDA
     # ABI and defer the failure until the first user generation.
+    _stage("native:spconv")
     indices = torch.tensor(
         [[0, 0, 0, 0], [0, 0, 0, 1], [0, 0, 1, 0], [0, 1, 0, 0]],
         dtype=torch.int32,
@@ -4535,6 +4562,7 @@ if native:
     if sparse_output.shape != (4, 3) or not torch.isfinite(sparse_output).all().item():
         raise RuntimeError("spconv CUDA kernel smoke returned invalid output")
 
+    _stage("native:torch-scatter")
     scatter_source = torch.tensor([[1.0], [3.0], [2.0], [6.0]], device=device)
     scatter_index = torch.tensor([0, 0, 1, 1], device=device)
     scatter_output = torch_scatter.scatter_mean(scatter_source, scatter_index, dim=0)
@@ -4543,6 +4571,7 @@ if native:
     ):
         raise RuntimeError("torch-scatter CUDA kernel smoke returned invalid output")
 
+    _stage("native:o-voxel")
     ovo_vertices = torch.tensor(
         [[0.5, 0.5, 0.5], [1.5, 0.5, 0.5], [0.5, 1.5, 0.5], [0.5, 0.5, 1.5]],
         dtype=torch.float32,
@@ -4567,12 +4596,14 @@ if native:
     ):
         raise RuntimeError("o-voxel CPU operator smoke returned invalid output")
 
+    _stage("native:xformers")
     attention_dtype = torch.bfloat16
     q = torch.randn((1, 8, 2, 32), device=device, dtype=attention_dtype)
     xformers_output = xops.memory_efficient_attention(q, q, q)
     if xformers_output.shape != q.shape or not torch.isfinite(xformers_output).all().item():
         raise RuntimeError("xformers CUDA attention smoke returned invalid output")
     if attention == "flash_attn":
+        _stage("native:flash-attn")
         import flash_attn
         if getattr(flash_attn, "flash_attn_varlen_func", None) is None:
             raise RuntimeError("flash_attn_varlen_func is missing")
@@ -4591,30 +4622,7 @@ print(json.dumps({
     "attention": attention,
 }, sort_keys=True))
 '''
-    smoke_env["MODLY_LATO2_EXPECTED_DISTS"] = json.dumps(expected, sort_keys=True)
-    smoke_env["MODLY_LATO2_NATIVE_SMOKE"] = "1" if plan.install_native_stack else "0"
-    smoke_env["MODLY_LATO2_OPEN3D_SMOKE"] = "1" if plan.arch == "x64" else "0"
-    smoke_env["MODLY_LATO2_OPEN3D_RENDER_SMOKE"] = (
-        "1" if plan.install_native_stack else "0"
-    )
-    smoke_env["MODLY_LATO2_ATTN_BACKEND"] = plan.attention_backend
-    try:
-        completed = subprocess.run(
-            [str(python), "-I", "-c", script],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=20 * 60,
-            env=smoke_env,
-        )
-        payload = json.loads(completed.stdout.strip().splitlines()[-1])
-    except (subprocess.SubprocessError, OSError, json.JSONDecodeError, IndexError) as exc:
-        raise DependencyError(
-            "DEPENDENCY_SMOKE_FAILED",
-            "the installed LATO.2 dependency stack failed its import/CUDA/native-symbol smoke check",
-        ) from exc
-    if not isinstance(payload, dict) or payload.get("ok") is not True:
-        raise DependencyError("DEPENDENCY_SMOKE_INVALID", "dependency smoke result is invalid")
+    payload = _run_dependency_probe(python, script, smoke_env)
     capability = payload.get("capability")
     if capability != [plan.gpu_sm // 10, plan.gpu_sm % 10]:
         raise DependencyError(
