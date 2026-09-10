@@ -1,6 +1,8 @@
 """Exercise production binary install/verification, without model or GPU setup.
 
 Run from a disposable venv with the exact Torch wheel and NumPy installed.
+For the audited cuSPARSELt ARM64 lane use a venv named venv.__modly_staging,
+matching normal setup's metadata-normalization precondition.
 This is not an end-to-end Modly/CUDA/inference acceptance test.
 """
 from __future__ import annotations
@@ -11,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import subprocess
 import sys
 import tempfile
 from unittest.mock import patch
@@ -52,6 +55,15 @@ def main() -> None:
              patch.object(deps, '_msvc_environment', side_effect=AssertionError('MSVC requested')), \
              patch.object(deps, '_linux_cxx_environment', side_effect=AssertionError('GCC requested')):
             setup._preflight_plan(plan, cache)
+            # This narrow test provisions Torch directly instead of running
+            # install_dependencies (which also needs a GPU). Reproduce its
+            # existing audited ARM64 metadata step before the mandatory pip
+            # graph check. Do not suppress pip-check failures or invent a fix.
+            if deps._cusparselt_normalization_identity(plan) is not None:
+                before = subprocess.run([sys.executable, '-m', 'pip', '--isolated', 'check'], capture_output=True, text=True, timeout=120)
+                print('Before existing ARM64 normalization:', before.stdout, before.stderr, flush=True)
+                normalized = deps.normalize_cusparselt_metadata(Path(sys.executable), plan)
+                print('Existing ARM64 metadata normalization:', json.dumps(normalized, sort_keys=True), flush=True)
             binary = setup._prepare_cpu_operator(plan, cache, cache)
             constraints = deps.materialize_dependency_constraints(cache, plan)
             setup._install_cpu_operator(Path(sys.executable), plan, cache, binary, constraints)

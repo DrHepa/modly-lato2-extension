@@ -58,7 +58,7 @@ jobs:
         run: |
           import os, pathlib, subprocess, sys
           base = os.environ.get('MODLY_ABI_PYTHON', sys.executable)
-          venv = pathlib.Path(os.environ['RUNNER_TEMP']).resolve() / 'binary-consumer'
+          venv = pathlib.Path(os.environ['RUNNER_TEMP']).resolve() / 'binary-consumer' / 'venv.__modly_staging'
           subprocess.run([base, '-m', 'venv', str(venv)], check=True)
           python = str(venv / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python'))
           output = pathlib.Path('binary-evidence'); output.mkdir(exist_ok=True)
