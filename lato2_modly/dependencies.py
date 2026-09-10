@@ -47,6 +47,8 @@ from .python_abi import (
     python_abi_diagnostic,
 )
 
+from . import binary_wheels as binaries
+
 from .ovoxel_cpu import (
     EIGEN_TREE_SHA256,
     LICENSE_SOURCE_SPECS,
@@ -2363,14 +2365,9 @@ def select_dependency_plan(
         )
 
     if profile == "auto":
-        # Windows defaults to the self-contained compatibility route.  The
-        # complete upstream CUDA build remains an explicit, toolchain-dependent
-        # opt-in there; Linux x64 keeps the exact upstream default.
-        profile = (
-            "portable"
-            if system == "win32" or arch == "arm64" or gpu_sm < 80 or gpu_sm >= 100
-            else "exact-upstream"
-        )
+        # Normal installation is binary-only on every supported platform.
+        # The different exact-upstream backend remains explicit developer opt-in.
+        profile = "portable"
 
     if profile == "exact-upstream":
         if arch != "x64":
@@ -2732,6 +2729,10 @@ def dependency_state_payload(
     normalization = _cusparselt_normalization_identity(plan)
     if normalization is not None:
         payload["installedMetadataNormalization"] = normalization
+    if not plan.install_native_stack:
+        wheel = binaries.select_wheel(plan)
+        payload["binaryWheel"] = {"key": wheel.key, "sha256": wheel.sha256,
+                                  "buildIdentity": wheel.build_identity}
     return payload
 
 
@@ -3926,6 +3927,15 @@ def cpu_build_environment(
     return env
 
 
+def cpu_runtime_environment(
+    plan: DependencyPlan, cache_root: Path, *, base_env: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """Runtime validation must not discover MSVC, GCC, SDKs or CUDA toolkits."""
+    env = sanitize_subprocess_environment(os.environ if base_env is None else base_env)
+    env["PYTHONNOUSERSITE"] = "1"
+    return env
+
+
 # Backwards-compatible descriptive alias used by early setup integration.
 portable_build_environment = cpu_build_environment
 
@@ -4245,7 +4255,9 @@ def verify_portable_cpu_extension(
     """
 
     python = _validated_venv_python_path(Path(python))
-    smoke_env = cpu_build_environment(plan, cache_root, base_env=env)
+    smoke_env = cpu_runtime_environment(plan, cache_root, base_env=env)
+    if not plan.install_native_stack:
+        binaries.verify_installed(python, binaries.select_wheel(plan), env=smoke_env)
     portable_identity = {
         "distribution": OVOXEL_CPU_DISTRIBUTION,
         "version": OVOXEL_CPU_VERSION,

@@ -80,7 +80,7 @@ and `num_samples` are fixed to `1`.
 - About **4.82 GB (4.49 GiB) of immutable model/source downloads**. Before
   downloading, setup requires the remaining asset bytes plus 2 GiB of
   extraction headroom on the Models volume. When an environment must be
-  rebuilt, it also reserves 8 GiB there for portable dependency/build caches
+  rebuilt, it also reserves 8 GiB there for portable dependency/wheel caches
   or 12 GiB for exact-upstream caches, and separately reserves 12 GiB on the
   Extensions volume for the transactional portable environment or 16 GiB for
   exact-upstream. Requirements are summed when Models and Extensions share a
@@ -100,9 +100,12 @@ and `num_samples` are fixed to `1`.
   `libice6`. Setup creates and reads a 16×16 Open3D `OffscreenRenderer` under
   `EGL_PLATFORM=surfaceless` and a private `XDG_RUNTIME_DIR`; a missing
   EGL/Filament runtime therefore fails exact setup before state is published.
-- The portable profile still compiles the exact CPU
-  `mesh_to_flexible_dual_grid` operation and therefore needs a C++17
-  compiler, but it does not require `nvcc`.
+- **Normal (`auto` / `portable`) installation requires no compiler, Visual Studio,
+  Windows SDK or CUDA Toolkit.** The extension downloads a SHA-256-pinned wheel
+  for the CPU voxelizer matching the exact Python/OS/architecture/PyTorch build.
+  It never falls back to source compilation. A missing published binary is a
+  distribution error (`BINARY_WHEEL_UNAVAILABLE`), not a request to install MSVC.
+  NVIDIA drivers and runtime libraries are still runtime requirements.
 
 Upstream reports roughly 8 GB of VRAM for its reference run. That is an
 upstream estimate, not a guarantee for every input, parameter set, GPU
@@ -166,7 +169,7 @@ materialize a separately fingerprinted portable copy; the node-level
 | Sparse attention | FlashAttention 2 on supported Linux GPUs, otherwise xFormers | PyTorch SDPA with independent packed-sequence boundaries |
 | Precision | Upstream BF16 behavior | `auto` selects BF16 when supported, otherwise FP16 |
 | Conditioning render | Open3D/Filament | Open3D first when available; deterministic Pillow renderer on import/context/render failure |
-| Voxelization | Full pinned O-Voxel native stack | Exact TRELLIS.2 `mesh_to_flexible_dual_grid_cpu` compiled as a narrow C++ extension |
+| Voxelization | Full pinned O-Voxel native stack | Pinned TRELLIS.2 `mesh_to_flexible_dual_grid_cpu` distributed as a precompiled narrow C++ extension |
 
 The portable profile preserves all four inference entry points, parameters,
 checkpoint formats, and upstream sidecars. It does **not** claim numerical or
@@ -175,7 +178,11 @@ software renderer can change DINOv2 conditioning. See
 [PORTABLE_BACKEND.md](PORTABLE_BACKEND.md) for provenance and validation
 boundaries.
 
-The setup profile defaults from the detected platform/GPU. Advanced users may
+Starting with 1.2.0, `auto` selects **portable on every supported platform**.
+This also changes the old Linux x64 SM 8.x/9.x automatic default from
+exact-upstream to the documented compatibility backend (different attention,
+sparse implementation and potentially conditioning renderer). Existing exact
+users can retain that backend by choosing it explicitly. Advanced users may
 set `MODLY_LATO2_DEPENDENCY_PROFILE=exact-upstream` or
 `MODLY_LATO2_DEPENDENCY_PROFILE=portable` before starting Modly and running
 Install/Repair. An unsupported explicit profile fails with an actionable
@@ -191,11 +198,11 @@ message; it is not downgraded silently.
 
 | Platform | Automatic route | Required local toolchain | Validation status |
 | --- | --- | --- | --- |
-| Windows x64 + NVIDIA CUDA | Portable compatibility by default; exact upstream is an explicit opt-in on BF16-capable GPUs | Exact: CUDA Toolkit 12.4 + VS 2022 C++/MSVC v143/Windows SDK. Portable: VS 2022 C++ | Implemented; full setup and generation not yet hardware-validated, and exact Windows is not certified |
-| Linux x86_64 + NVIDIA CUDA, SM 8.x/9.x | Exact upstream; FlashAttention on supported GPUs, xFormers otherwise | CUDA Toolkit 12.4 + C++17 compiler; glibc 2.31+ | Implemented; full setup and generation not yet hardware-validated |
-| Linux x86_64 + NVIDIA CUDA, pre-Ampere | Portable compatibility for FP16-capable inference | C++17 compiler | Implemented; full setup and generation not yet hardware-validated |
-| Linux ARM64 + NVIDIA CUDA | Portable cu126 for SM <10.0; portable cu128 for SM 10.0+ | C++17 compiler; glibc 2.28+ for both lanes | Experimental; full setup and generation not yet hardware-validated |
-| Linux/Windows x64, SM 10.0+ | Portable cu128 compatibility | C++17 compiler | Experimental; full setup and generation not yet hardware-validated |
+| Windows x64 + NVIDIA CUDA | Portable compatibility by default; exact upstream is an explicit opt-in on BF16-capable GPUs | Exact: CUDA Toolkit 12.4 + VS 2022 C++/MSVC v143/Windows SDK. Portable: none | Implemented; full setup and generation not yet hardware-validated, and exact Windows is not certified |
+| Linux x86_64 + NVIDIA CUDA, SM 8.x/9.x | Portable cu124; exact upstream is explicit opt-in | Portable: no compiler; glibc 2.31+ for the existing dependency closure | Implemented; full setup and generation not yet hardware-validated |
+| Linux x86_64 + NVIDIA CUDA, pre-Ampere | Portable compatibility for FP16-capable inference | No compiler | Implemented; full setup and generation not yet hardware-validated |
+| Linux ARM64 + NVIDIA CUDA | Portable cu126 for SM <10.0; portable cu128 for SM 10.0+ | No compiler; glibc 2.28+ for both lanes | Experimental; full setup and generation not yet hardware-validated |
+| Linux/Windows x64, SM 10.0+ | Portable cu128 compatibility | No compiler | Experimental; full setup and generation not yet hardware-validated |
 | CPU-only, ROCm, macOS, Windows ARM64 | Unsupported | — | Setup rejects the platform |
 
 Package availability alone is not treated as platform validation. Do not
@@ -428,9 +435,15 @@ and its adjacent log are the durable failure record when available.
 - **Setup reports `NVCC_MISSING` or `NVCC_VERSION_MISMATCH`:** the exact
   profile needs the CUDA 12.4 Toolkit and its `nvcc`, not only an NVIDIA
   driver. Install/activate that toolkit, then run Repair.
-- **Setup reports an MSVC/C++ error:** install the required compiler workload
-  described above, restart Modly so it inherits the toolchain environment, and
-  run Repair.
+- **`MSVC_MISSING` on normal installation:** update the extension code to the
+  binary-distribution version and select `auto` or `portable`. Repair with old
+  source code cannot fix this. Only explicit `exact-upstream` requires build tools.
+- **`BINARY_WHEEL_UNAVAILABLE`:** this extension version does not publish the
+  selected combination; update it or report the exact key in the message. Setup
+  deliberately will not compile, change Python, or choose another Torch build.
+- **`BINARY_WHEEL_CORRUPT` / `BINARY_INSTALLED_INVALID`:** run Repair. The original
+  installed environment remains protected by staging/rollback; model hashes and
+  model revision have not changed. Do not disable integrity checking.
 - **`BACKEND_UNAVAILABLE` or `PRECISION_UNAVAILABLE`:** choose Auto, or run
   Repair with the intended dependency profile. The exact backend does not
   accept Float16.
@@ -516,3 +529,8 @@ terms, including the non-commercial research/evaluation restriction in
 nvdiffrast's license and the separately noticed NVIDIA-derived cubvh material.
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and the complete copies
 under [LICENSES/](LICENSES/).
+
+## Binary distribution and maintainer builds
+
+See [BINARY_DISTRIBUTION.md](BINARY_DISTRIBUTION.md) for artifact identity,
+compiler-free Install/Repair, CI construction, and validation boundaries.

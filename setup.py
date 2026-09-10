@@ -32,6 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lato2_modly import dependencies as deps
+from lato2_modly import binary_wheels as binaries
 from lato2_modly.assets import ensure_snapshot, verify_asset, verify_snapshot
 from lato2_modly.constants import (
     ASSETS,
@@ -657,7 +658,9 @@ def _preflight_plan(plan: deps.DependencyPlan, cache_root: Path) -> None:
 
     if plan.install_native_stack:
         deps.native_build_environment(plan, cache_root)
-    deps.cpu_build_environment(plan, cache_root)
+        deps.cpu_build_environment(plan, cache_root)
+    else:
+        binaries.select_wheel(plan)  # Fail before model downloads; never compile as fallback.
 
 
 def _volume_key(path: Path) -> tuple[int, str]:
@@ -699,7 +702,7 @@ def _preflight_install_storage(
         (
             cache_root,
             cache_required,
-            f"the {plan.profile} dependency downloads and native build cache",
+            f"the {plan.profile} dependency downloads and operator cache",
         ),
     )
     grouped: dict[tuple[int, str], tuple[Path, int, list[str]]] = {}
@@ -860,6 +863,78 @@ def _reusable_environment(
     return EnvironmentResult(python, True, dependency_smoke, portable_smoke)
 
 
+def _install_cpu_operator(python, plan, cache_root, cpu_build, constraint_file):
+    """Use pinned wheels in portable mode; source builds are explicit-only."""
+    if not plan.install_native_stack:
+        if not isinstance(cpu_build, binaries.WheelSpec):
+            raise SetupFailure("BINARY_PLAN_INVALID", "portable installation requires a pinned wheel record")
+        wheel = binaries.ensure_wheel(cache_root, cpu_build, log=log)
+        env = deps.cpu_runtime_environment(plan, cache_root)
+        # --only-binary + --no-index + local verified wheel: no resolver source fallback.
+        command = deps.isolated_pip_command(python, [
+            "install", "--constraint", str(constraint_file), "--no-deps",
+            "--no-index", "--only-binary=:all:", str(wheel),
+        ], env)
+        binaries.verify_wheel(wheel, cpu_build)
+        _run_checked(command, stage="Installing verified prebuilt o-voxel CPU operator", env=env)
+        return env
+    pip_args = getattr(cpu_build, "pip_install_args", None)
+    expected_cpu_prefix = (
+        "-m",
+        "pip",
+        "install",
+        "--no-build-isolation",
+        "--no-deps",
+    )
+    if (
+        not isinstance(pip_args, tuple)
+        or len(pip_args) != len(expected_cpu_prefix) + 1
+        or pip_args[:-1] != expected_cpu_prefix
+    ):
+        raise SetupFailure(
+            "PORTABLE_BUILD_INVALID",
+            "the portable CPU build returned invalid install arguments",
+        )
+    source_argument = pip_args[-1]
+    if not isinstance(source_argument, (str, os.PathLike)):
+        raise SetupFailure(
+            "PORTABLE_BUILD_INVALID",
+            "the portable CPU build source path is invalid",
+        )
+    build_source = Path(source_argument)
+    if not build_source.is_absolute():
+        raise SetupFailure(
+            "PORTABLE_BUILD_INVALID",
+            "the portable CPU build source path must be absolute",
+        )
+    cpu_workspace = deps.prepare_build_workspace(
+        build_source,
+        cache_root,
+        plan,
+        "ovoxel-cpu",
+    )
+    cpu_env = deps.cpu_build_environment(plan, cache_root)
+    cpu_install = deps.isolated_pip_command(
+        python,
+        [
+            "install",
+            "--constraint",
+            str(constraint_file),
+            "--no-build-isolation",
+            "--no-deps",
+            "--no-index",
+            str(cpu_workspace),
+        ],
+        cpu_env,
+    )
+    _run_checked(
+        cpu_install,
+        stage="Building and installing the pinned o-voxel CPU operator",
+        env=cpu_env,
+    )
+    return cpu_env
+
+
 def _install_environment(
     context: SetupContext,
     plan: deps.DependencyPlan,
@@ -890,60 +965,7 @@ def _install_environment(
             constraint_file, plan
         )
 
-        pip_args = getattr(cpu_build, "pip_install_args", None)
-        expected_cpu_prefix = (
-            "-m",
-            "pip",
-            "install",
-            "--no-build-isolation",
-            "--no-deps",
-        )
-        if (
-            not isinstance(pip_args, tuple)
-            or len(pip_args) != len(expected_cpu_prefix) + 1
-            or pip_args[:-1] != expected_cpu_prefix
-        ):
-            raise SetupFailure(
-                "PORTABLE_BUILD_INVALID",
-                "the portable CPU build returned invalid install arguments",
-            )
-        source_argument = pip_args[-1]
-        if not isinstance(source_argument, (str, os.PathLike)):
-            raise SetupFailure(
-                "PORTABLE_BUILD_INVALID",
-                "the portable CPU build source path is invalid",
-            )
-        build_source = Path(source_argument)
-        if not build_source.is_absolute():
-            raise SetupFailure(
-                "PORTABLE_BUILD_INVALID",
-                "the portable CPU build source path must be absolute",
-            )
-        cpu_workspace = deps.prepare_build_workspace(
-            build_source,
-            cache_root,
-            plan,
-            "ovoxel-cpu",
-        )
-        cpu_env = deps.cpu_build_environment(plan, cache_root)
-        cpu_install = deps.isolated_pip_command(
-            python,
-            [
-                "install",
-                "--constraint",
-                str(constraint_file),
-                "--no-build-isolation",
-                "--no-deps",
-                "--no-index",
-                str(cpu_workspace),
-            ],
-            cpu_env,
-        )
-        _run_checked(
-            cpu_install,
-            stage="Building and installing the pinned o-voxel CPU operator",
-            env=cpu_env,
-        )
+        cpu_env = _install_cpu_operator(python, plan, cache_root, cpu_build, constraint_file)
         _run_checked(
             deps.isolated_pip_command(python, ["check"], cpu_env),
             stage="Checking the staging dependency graph after the CPU operator",
@@ -1027,7 +1049,7 @@ def _promote_environment(
                 "VENV_PROMOTION_ABI_MISMATCH",
                 "the promoted environment no longer matches Modly's Python ABI",
             )
-        cpu_env = deps.cpu_build_environment(plan, cache_root)
+        cpu_env = deps.cpu_runtime_environment(plan, cache_root)
         _run_checked(
             deps.isolated_pip_command(python, ["check"], cpu_env),
             stage="Checking the promoted dependency graph",
@@ -1167,6 +1189,19 @@ def install_or_reuse_environment(
     return _install_environment(context, plan, cache_root, cpu_build, expected_state)
 
 
+def _prepare_cpu_operator(plan, cache_root, revision):
+    if plan.install_native_stack:
+        cpu_sources = deps.prepare_portable_cpu_sources(cache_root, log=log)
+        return materialize_ovoxel_cpu_build(
+            ovoxel_source_root=cpu_sources.ovoxel,
+            eigen_source_root=cpu_sources.eigen,
+            build_root=revision / "native" / "ovoxel_cpu-build",
+        )
+    else:
+        return binaries.select_wheel(plan)
+
+
+
 def _run_setup_locked(context: SetupContext) -> Path:
     log(
         f"host={context.platform_name}/{context.arch} accelerator={context.accelerator} "
@@ -1219,12 +1254,7 @@ def _run_setup_locked(context: SetupContext) -> Path:
         upstream_root=paths.lato_source,
         portable_root=revision / "source" / "LATO.2-portable",
     )
-    cpu_sources = deps.prepare_portable_cpu_sources(cache_root, log=log)
-    cpu_build = materialize_ovoxel_cpu_build(
-        ovoxel_source_root=cpu_sources.ovoxel,
-        eigen_source_root=cpu_sources.eigen,
-        build_root=revision / "native" / "ovoxel_cpu-build",
-    )
+    cpu_build = _prepare_cpu_operator(plan, cache_root, revision)
 
     environment = install_or_reuse_environment(context, plan, cache_root, cpu_build)
     # Configuration publication is the transaction's commit point.  A Repair

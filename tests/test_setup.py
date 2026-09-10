@@ -376,7 +376,7 @@ class EnvironmentTests(unittest.TestCase):
                 + setup.PORTABLE_BUILD_CACHE_FREE_BYTES,
             )
             self.assertIn("Python environment", purpose)
-            self.assertIn("build cache", purpose)
+            self.assertIn("operator cache", purpose)
 
     def test_install_space_checks_split_volumes_independently(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -443,6 +443,7 @@ class EnvironmentTests(unittest.TestCase):
             with (
                 patch.object(setup, "interpreter_fingerprint", return_value=FINGERPRINT),
                 patch.object(setup.deps, "cpu_build_environment", return_value={}),
+                patch.object(setup.deps, "cpu_runtime_environment", return_value={}),
                 patch.object(
                     setup,
                     "_run_checked",
@@ -588,7 +589,7 @@ class EnvironmentTests(unittest.TestCase):
             root = Path(temporary).resolve()
             (root / "cache").mkdir()
             context = fake_context(root)
-            plan = fake_plan()
+            plan = fake_plan(exact=True)
             events: list[str] = []
             checked_commands: list[list[str]] = []
             cpu_build = types.SimpleNamespace(
@@ -644,6 +645,7 @@ class EnvironmentTests(unittest.TestCase):
                     side_effect=lambda path, _plan: path,
                 ),
                 patch.object(setup.deps, "cpu_build_environment", return_value={}),
+                patch.object(setup.deps, "cpu_runtime_environment", return_value={}),
                 patch.object(
                     setup.deps,
                     "prepare_build_workspace",
@@ -773,7 +775,7 @@ class EnvironmentTests(unittest.TestCase):
             config.write_text('{"generation": "old"}', encoding="utf-8")
             state.write_text('{"generation": "old"}', encoding="utf-8")
             context = fake_context(root)
-            plan = fake_plan()
+            plan = fake_plan(exact=True)
             cpu_build = types.SimpleNamespace(
                 pip_install_args=(
                     "-m",
@@ -829,6 +831,7 @@ class EnvironmentTests(unittest.TestCase):
                     side_effect=lambda path, _plan: path,
                 ),
                 patch.object(setup.deps, "cpu_build_environment", return_value={}),
+                patch.object(setup.deps, "cpu_runtime_environment", return_value={}),
                 patch.object(
                     setup.deps,
                     "prepare_build_workspace",
@@ -931,7 +934,7 @@ class IntegrationTests(unittest.TestCase):
             patch.object(setup, "verify_snapshot", return_value=[]),
             patch.object(setup, "materialize_portable_runtime", return_value=portable_report),
             patch.object(setup.deps, "prepare_portable_cpu_sources", return_value=cpu_sources),
-            patch.object(setup, "materialize_ovoxel_cpu_build", return_value=cpu_build),
+            patch.object(setup, "_prepare_cpu_operator", return_value=cpu_build),
             patch.object(setup, "install_or_reuse_environment", side_effect=lambda *_: events.append("environment") or environment),
             patch.object(setup.deps, "dependency_lock_digest", return_value="a" * 64),
             patch.object(setup, "write_runtime_config", side_effect=write_config),

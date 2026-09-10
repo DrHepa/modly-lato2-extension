@@ -187,8 +187,8 @@ def fake_cusparselt_distribution(
 
 
 class PlanSelectionTests(unittest.TestCase):
-    def test_linux_ampere_auto_is_complete_exact_profile(self) -> None:
-        plan = deps.select_dependency_plan(context(sm=86))
+    def test_linux_ampere_explicit_exact_is_complete_profile(self) -> None:
+        plan = deps.select_dependency_plan(context(sm=86), "exact-upstream")
         self.assertEqual(plan.profile, "exact-upstream")
         self.assertEqual(plan.torch_lane, "cu124")
         self.assertEqual(plan.attention_backend, "flash_attn")
@@ -1021,7 +1021,7 @@ class LockAndStateTests(unittest.TestCase):
             self.assertNotEqual(deps.dependency_lock_digest(plan), original)
 
     def test_state_is_exact_and_rejects_symlinks(self) -> None:
-        plan = deps.select_dependency_plan(context(sm=86))
+        plan = deps.select_dependency_plan(context(sm=86), "exact-upstream")
         payload = deps.dependency_state_payload(plan, {"cache_tag": "cpython-311"})
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1039,7 +1039,7 @@ class LockAndStateTests(unittest.TestCase):
             self.assertFalse(deps.state_matches(alias, payload))
 
     def test_state_rejects_hardlinks(self) -> None:
-        plan = deps.select_dependency_plan(context(sm=86))
+        plan = deps.select_dependency_plan(context(sm=86), "exact-upstream")
         payload = deps.dependency_state_payload(plan, {"cache_tag": "cpython-311"})
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

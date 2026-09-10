@@ -25,7 +25,7 @@ copy `report.to_dict()`; in particular it should retain
 | Sparse attention | Adds `SPARSE_ATTN_BACKEND=sdpa`; FlashAttention and xFormers stay intact | PyTorch SDPA is applied independently to the same packed sequence boundaries. It is semantically block-diagonal but still needs checkpoint-level GPU parity testing. |
 | Precision | Replaces hard-coded BF16 autocast in all four inference scripts | `LATO2_PRECISION=auto` uses `torch.cuda.is_bf16_supported()`: BF16 when true, otherwise FP16. Explicit values are `bfloat16` and `float16`. There is no new CLI flag, so all upstream CLI parameters remain unchanged. |
 | Conditioning renderer | Open3D remains first choice | On Open3D import/context/render failure, `auto` falls back to a deterministic Pillow software renderer. It preserves camera controls and RGB shape, but is not pixel-equivalent to Filament and may change DINO conditioning. `LATO2_RENDERER=open3d` makes failure fatal; `software` explicitly selects the fallback for diagnostics. |
-| Mesh voxelization | Builds only the pinned CPU function LATO.2 calls | `lato2_modly.ovoxel_cpu` compiles the exact `mesh_to_flexible_dual_grid_cpu` C++ source from TRELLIS.2 commit `75fbf018…` with its Eigen submodule commit `21e4582d…`. The wrapper avoids importing unrelated IO/rasterize/serialize/postprocess code. It does not approximate voxelization and does not need CUDA/nvcc. The complete o-voxel package remains installed on the exact upstream lane. |
+| Mesh voxelization | Installs a pinned precompiled wheel for the CPU function LATO.2 calls | The maintainer CI uses `lato2_modly.ovoxel_cpu` to compile the pinned `mesh_to_flexible_dual_grid_cpu` C++ source from TRELLIS.2 commit `75fbf018…` with its Eigen submodule commit `21e4582d…`. The wrapper avoids importing unrelated IO/rasterize/serialize/postprocess code. It does not approximate voxelization and does not need CUDA/nvcc. The complete o-voxel package remains installed on the exact upstream lane. |
 | `torch_scatter.scatter_mean` | Uses the installed extension when importable, otherwise the official Space's PyTorch fallback | The fallback is additive and is not a reason to remove `torch-scatter` from the complete upstream dependency installation. |
 
 The overlay applies to all upstream entry points without removing options or
@@ -44,10 +44,12 @@ retains the upstream backend choices, but those choices are executable only in
 an environment where their exact native dependencies were installed; the
 runtime rejects an unavailable profile instead of falling back silently.
 
-### Minimal voxelizer build contract
+### Maintainer-only voxelizer build contract
 
-After PyTorch is installed, setup prepares and installs the portable native
-operator as follows:
+Normal Install/Repair installs and verifies the committed binary inventory; it
+never calls this materializer or checks for a compiler. The following source
+build contract is retained for maintainer CI and explicit `exact-upstream`
+development builds only:
 
 ```python
 from lato2_modly.ovoxel_cpu import materialize_ovoxel_cpu_build
