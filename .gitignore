@@ -33,3 +33,8 @@ dist/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Maintainer wheel-building environments (never shipped)
+/.wheel-builder/
+/wheel-build-cache/
+/wheel-output/
