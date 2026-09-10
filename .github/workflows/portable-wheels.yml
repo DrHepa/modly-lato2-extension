@@ -1,9 +1,11 @@
 name: Build portable operator wheels
 on:
-  push:
-    branches: [fix/prebuilt-portable-runtime]
-    paths: [tools/build_portable_wheel.py, .github/workflows/portable-wheels.yml]
   workflow_dispatch:
+    inputs:
+      release:
+        description: New binary pack tag (review generated hashes before publishing)
+        type: string
+        required: true
 permissions:
   contents: read
 jobs:
@@ -24,21 +26,23 @@ jobs:
         shell: python
         env:
           TORCH_BUILD: ${{ matrix.torch }}
+          RELEASE_TAG: ${{ inputs.release }}
         run: |
-          import os, pathlib, subprocess, sys
+          import os, pathlib, re, subprocess, sys
+          assert re.fullmatch(r'ovoxel-cpu-[A-Za-z0-9._-]+', os.environ['RELEASE_TAG'])
           envdir = pathlib.Path('.wheel-builder').resolve()
           subprocess.run([sys.executable, '-m', 'venv', str(envdir)], check=True)
           p = str(envdir / 'Scripts/python.exe')
           def run(*args): subprocess.run([p, *args], check=True)
           run('-m', 'pip', 'install', '--only-binary=:all:', 'numpy==2.2.6', 'setuptools==80.9.0', 'wheel==0.45.1', 'packaging==25.0', 'ninja==1.13.0')
           run('-m', 'pip', 'install', '--only-binary=:all:', 'torch==' + os.environ['TORCH_BUILD'], '--index-url', 'https://download.pytorch.org/whl/' + os.environ['TORCH_BUILD'].split('+')[1])
-          run('tools/build_portable_wheel.py', '--torch', os.environ['TORCH_BUILD'], '--release', 'ovoxel-cpu-post2-20260910.1')
+          run('tools/windows_wheel_builder.py', '--torch', os.environ['TORCH_BUILD'], '--release', os.environ['RELEASE_TAG'])
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: wheel-windows-${{ matrix.python }}-${{ matrix.torch }}
           path: wheel-output/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
   linux:
     runs-on: ${{ matrix.os }}
     container:
@@ -64,15 +68,17 @@ jobs:
         env:
           PY_ABI: ${{ matrix.python }}
           TORCH_BUILD: ${{ matrix.torch }}
+          RELEASE_TAG: ${{ inputs.release }}
         run: |
           set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^ovoxel-cpu-[A-Za-z0-9._-]+$ ]]
           /opt/python/cp${PY_ABI}-cp${PY_ABI}/bin/python -m venv .wheel-builder
           .wheel-builder/bin/python -m pip install --only-binary=:all: numpy==2.2.6 setuptools==80.9.0 wheel==0.45.1 packaging==25.0 ninja==1.13.0
           .wheel-builder/bin/python -m pip install --only-binary=:all: "torch==$TORCH_BUILD" --index-url "https://download.pytorch.org/whl/${TORCH_BUILD#*+}"
-          .wheel-builder/bin/python tools/build_portable_wheel.py --torch "$TORCH_BUILD" --release ovoxel-cpu-post2-20260910.1
+          .wheel-builder/bin/python tools/build_portable_wheel.py --torch "$TORCH_BUILD" --release "$RELEASE_TAG"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: wheel-linux-${{ matrix.arch }}-${{ matrix.python }}-${{ matrix.torch }}
           path: wheel-output/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14

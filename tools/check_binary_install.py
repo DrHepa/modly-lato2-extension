@@ -23,6 +23,7 @@ from lato2_modly import binary_wheels as binaries, dependencies as deps
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('--torch', required=True)
+    parser.add_argument('--report', type=Path)
     args = parser.parse_args()
     if sys.prefix == sys.base_prefix:
         raise RuntimeError('Use a disposable virtual environment')
@@ -37,6 +38,12 @@ def main() -> None:
                                            cuda_version=128, accelerator='cuda'), 'portable')
     if plan.torch_requirements[0] != 'torch==' + args.torch:
         raise RuntimeError('Unexpected Python/Torch lane')
+    # Installed binaries must work with no compiler executable discoverable.
+    executable_dir = str(Path(sys.executable).parent)
+    os.environ['PATH'] = os.pathsep.join([executable_dir, str(Path(os.environ.get('SYSTEMROOT', 'C:/Windows'))/'System32')]) if os.name == 'nt' else executable_dir
+    for name in list(os.environ):
+        if name.upper() in {'CC', 'CXX', 'INCLUDE', 'LIB', 'LIBPATH', 'CUDA_HOME', 'CUDA_PATH', 'VCINSTALLDIR', 'VSINSTALLDIR', 'VCTOOLSINSTALLDIR'}:
+            os.environ.pop(name, None)
     with tempfile.TemporaryDirectory() as temporary:
         cache = Path(temporary).resolve()
         # The production path must not even *look* for a toolchain.
@@ -54,9 +61,13 @@ def main() -> None:
                 cached = binaries.ensure_wheel(cache, binary)
                 repeated = deps.verify_portable_cpu_extension(Path(sys.executable), plan, cache)
             assert verified['ok'] and repeated['ok'] and cached.is_file()
-            print(json.dumps({'key': binary.key, 'wheel_sha256': binary.sha256,
-                              'install': 'passed', 'repeat_verification': 'passed',
-                              'scope': 'production CPU binary path only; not GPU or full Modly setup'}, indent=2))
+            report = {'key': binary.key, 'wheel_sha256': binary.sha256,
+                      'install': 'passed', 'repeat_verification': 'passed',
+                      'scope': 'production CPU binary path only; not GPU or full Modly setup'}
+            if args.report is not None:
+                args.report.parent.mkdir(parents=True, exist_ok=True)
+                args.report.write_text(json.dumps(report, indent=2)+'\n', encoding='utf-8')
+            print(json.dumps(report, indent=2))
 
 
 if __name__ == '__main__':
